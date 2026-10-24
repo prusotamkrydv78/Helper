@@ -1,0 +1,403 @@
+import { useState, type ReactNode } from "react";
+import {
+  Bot,
+  Cpu,
+  Eye,
+  EyeOff,
+  Monitor,
+  Moon,
+  Palette,
+  RefreshCw,
+  RotateCcw,
+  Shield,
+  SlidersHorizontal,
+  Sun,
+  Wrench,
+} from "lucide-react";
+import type { PermissionLevel, Settings } from "../types";
+import { cn, formatRelative } from "../lib/utils";
+import { useStore } from "../store/AppStore";
+import { MODELS } from "../store/defaults";
+import { Page, PageHeader } from "../components/layout/Page";
+import { Button, Spinner } from "../components/ui/Button";
+import { ConfirmDialog, Tooltip, useToast } from "../components/ui/overlays";
+import { Badge, Field, Input, Segmented, Select, Switch, Textarea } from "../components/ui/primitives";
+
+const SECTIONS = [
+  { id: "general", label: "General", icon: SlidersHorizontal },
+  { id: "appearance", label: "Appearance", icon: Palette },
+  { id: "model", label: "AI model", icon: Bot },
+  { id: "permissions", label: "Tool permissions", icon: Wrench },
+  { id: "agent", label: "Local agent", icon: Cpu },
+  { id: "privacy", label: "Privacy & execution", icon: Shield },
+] as const;
+
+function UiOnly({ children = "UI only" }: { children?: ReactNode }) {
+  return (
+    <Tooltip label="Saved locally, but not yet connected to a backend">
+      <Badge tone="warning">{children}</Badge>
+    </Tooltip>
+  );
+}
+
+function Section({ id, title, description, badge, children }: { id: string; title: string; description?: string; badge?: ReactNode; children: ReactNode }) {
+  return (
+    <section id={`settings-${id}`} className="scroll-mt-6">
+      <div className="mb-2 flex items-center gap-2">
+        <h2 className="text-base font-semibold">{title}</h2>
+        {badge}
+      </div>
+      {description && <p className="-mt-1 mb-3 text-sm text-fg-muted">{description}</p>}
+      <div className="divide-y divide-border rounded-xl border border-border bg-surface px-4">{children}</div>
+    </section>
+  );
+}
+
+export function SettingsPage() {
+  const { state, actions, agent } = useStore();
+  const toast = useToast();
+  const s = state.settings;
+  const set = (patch: Partial<Settings>) => actions.updateSettings(patch);
+  const [showKey, setShowKey] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  const jump = (id: string) =>
+    document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: s.reduceMotion ? "auto" : "smooth", block: "start" });
+
+  return (
+    <Page className="max-w-5xl">
+      <PageHeader
+        title="Settings"
+        description="Preferences are saved on this device."
+        actions={
+          <Button variant="ghost" icon={<RotateCcw className="size-4" />} onClick={() => setConfirmReset(true)}>
+            Reset to defaults
+          </Button>
+        }
+      />
+
+      <div className="flex gap-10">
+        <nav aria-label="Settings sections" className="sticky top-0 hidden w-44 shrink-0 self-start md:block">
+          <ul className="space-y-0.5">
+            {SECTIONS.map(({ id, label, icon: Icon }) => (
+              <li key={id}>
+                <button
+                  type="button"
+                  onClick={() => jump(id)}
+                  className="flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.5 text-sm text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+                >
+                  <Icon className="size-4" />
+                  {label}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </nav>
+
+        <div className="min-w-0 flex-1 space-y-9">
+          <Section id="general" title="General">
+            <Field label="Send with Enter" description="When off, use Ctrl+Enter to send and Enter for a new line." inline>
+              {() => <Switch checked={s.sendOnEnter} onChange={(v) => set({ sendOnEnter: v })} label="Send with Enter" />}
+            </Field>
+            <Field label="Auto-scroll" description="Follow new messages while you're at the bottom of a chat." inline>
+              {() => <Switch checked={s.autoScroll} onChange={(v) => set({ autoScroll: v })} label="Auto-scroll" />}
+            </Field>
+            <Field label="Open task details automatically" description="Show the side panel when a task starts." inline>
+              {() => (
+                <Switch
+                  checked={s.showTaskPanelAutomatically}
+                  onChange={(v) => set({ showTaskPanelAutomatically: v })}
+                  label="Open task details automatically"
+                />
+              )}
+            </Field>
+          </Section>
+
+          <Section id="appearance" title="Appearance">
+            <Field label="Theme" inline>
+              {() => (
+                <Segmented
+                  label="Theme"
+                  value={s.theme}
+                  onChange={(theme) => set({ theme })}
+                  options={[
+                    { value: "dark", label: "Dark", icon: <Moon className="size-3.5" /> },
+                    { value: "light", label: "Light", icon: <Sun className="size-3.5" /> },
+                    { value: "system", label: "System", icon: <Monitor className="size-3.5" /> },
+                  ]}
+                />
+              )}
+            </Field>
+            <Field label="Text size" inline>
+              {() => (
+                <Segmented
+                  label="Text size"
+                  value={s.fontSize}
+                  onChange={(fontSize) => set({ fontSize })}
+                  options={[
+                    { value: "sm", label: "Small" },
+                    { value: "md", label: "Default" },
+                    { value: "lg", label: "Large" },
+                  ]}
+                />
+              )}
+            </Field>
+            <Field label="Compact messages" description="Reduce spacing between messages." inline>
+              {() => <Switch checked={s.compactMessages} onChange={(v) => set({ compactMessages: v })} label="Compact messages" />}
+            </Field>
+            <Field label="Reduce motion" description="Minimize animations and transitions." inline>
+              {() => <Switch checked={s.reduceMotion} onChange={(v) => set({ reduceMotion: v })} label="Reduce motion" />}
+            </Field>
+          </Section>
+
+          <Section
+            id="model"
+            title="AI model"
+            badge={<UiOnly />}
+            description="Configure the model used for chat and planning. No AI backend is connected yet — replies come from a mock service."
+          >
+            <div className="grid gap-x-4 sm:grid-cols-2">
+              <Field label="Provider">
+                {(id) => (
+                  <Select
+                    id={id}
+                    value={s.provider}
+                    onChange={(e) => {
+                      const provider = e.target.value as Settings["provider"];
+                      set({ provider, model: MODELS[provider][0] });
+                    }}
+                  >
+                    <option value="anthropic">Anthropic</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="local">Local model</option>
+                  </Select>
+                )}
+              </Field>
+              <Field label="Model">
+                {(id) => (
+                  <Select id={id} value={s.model} onChange={(e) => set({ model: e.target.value })}>
+                    {MODELS[s.provider].map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+            </div>
+            <Field label="API key" description="Stored only on this device. It isn't sent anywhere until a backend exists.">
+              {(id) => (
+                <div className="relative">
+                  <Input
+                    id={id}
+                    type={showKey ? "text" : "password"}
+                    value={s.apiKey}
+                    onChange={(e) => set({ apiKey: e.target.value })}
+                    placeholder="Not configured"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="pr-9 font-mono"
+                  />
+                  <button
+                    type="button"
+                    aria-label={showKey ? "Hide API key" : "Show API key"}
+                    onClick={() => setShowKey((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer rounded p-1 text-fg-subtle hover:text-fg"
+                  >
+                    {showKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                  </button>
+                </div>
+              )}
+            </Field>
+            <Field label={`Temperature · ${s.temperature.toFixed(1)}`} description="Lower is more focused, higher is more creative.">
+              {(id) => (
+                <input
+                  id={id}
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.1}
+                  value={s.temperature}
+                  onChange={(e) => set({ temperature: Number(e.target.value) })}
+                  className="w-full cursor-pointer accent-[var(--accent)]"
+                />
+              )}
+            </Field>
+            <Field label="System instructions">
+              {(id) => <Textarea id={id} rows={3} value={s.systemPrompt} onChange={(e) => set({ systemPrompt: e.target.value })} />}
+            </Field>
+          </Section>
+
+          <Section
+            id="permissions"
+            title="Tool permissions"
+            badge={<UiOnly />}
+            description="Choose what the assistant may do without asking. These will be enforced by the local executor once it exists."
+          >
+            {s.permissions.map((p) => (
+              <Field
+                key={p.tool}
+                inline
+                label={p.label}
+                description={
+                  <span className="inline-flex items-center gap-1.5">
+                    {p.description}
+                    {p.risk === "high" && <Badge tone="danger">High risk</Badge>}
+                  </span>
+                }
+              >
+                {() => (
+                  <Segmented<PermissionLevel>
+                    label={`${p.label} permission`}
+                    value={p.level}
+                    onChange={(level) => {
+                      if (level === "allow" && p.risk === "high" && s.requireApprovalForHighRisk) {
+                        toast("High-risk tools always ask while “Require approval for high-risk actions” is on", "info");
+                        return;
+                      }
+                      set({ permissions: s.permissions.map((x) => (x.tool === p.tool ? { ...x, level } : x)) });
+                    }}
+                    options={[
+                      { value: "allow", label: "Allow" },
+                      { value: "ask", label: "Ask" },
+                      { value: "deny", label: "Deny" },
+                    ]}
+                  />
+                )}
+              </Field>
+            ))}
+          </Section>
+
+          <Section id="agent" title="Local PC agent" description="The local executor carries out approved actions on this computer.">
+            <div className="flex flex-wrap items-center gap-4 py-4">
+              <span
+                className={cn(
+                  "flex size-9 items-center justify-center rounded-lg border",
+                  agent.state === "connected" ? "border-success/30 bg-success-soft text-success" : "border-border bg-surface-2 text-fg-subtle",
+                )}
+              >
+                {agent.state === "checking" ? <Spinner className="size-4" /> : <Cpu className="size-4" />}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="flex items-center gap-2 text-sm font-medium">
+                  {agent.state === "checking" && "Checking connection…"}
+                  {agent.state === "connected" && "Connected"}
+                  {agent.state === "disconnected" && "Disconnected"}
+                  {agent.state === "not_installed" && "Not installed"}
+                  {agent.state !== "checking" && (
+                    <span
+                      className={cn("size-1.5 rounded-full", agent.state === "connected" ? "bg-success" : "bg-fg-subtle")}
+                      aria-hidden
+                    />
+                  )}
+                </p>
+                <p className="text-xs text-fg-muted">
+                  {agent.state === "connected" && `Version ${agent.version}`}
+                  {(agent.state === "not_installed" || agent.state === "disconnected") && agent.detail}
+                  {agent.state === "checking" && "Looking for a local executor…"}
+                </p>
+                {"checkedAt" in agent && <p className="mt-0.5 text-[11px] text-fg-subtle">Checked {formatRelative(agent.checkedAt)}</p>}
+              </div>
+              <Button variant="outline" icon={<RefreshCw className="size-3.5" />} loading={agent.state === "checking"} onClick={actions.checkAgent}>
+                Check again
+              </Button>
+            </div>
+          </Section>
+
+          <Section id="privacy" title="Privacy & execution">
+            <Field label="Save conversation history" description="Keep chats and tasks on this device between sessions." inline>
+              {() => <Switch checked={s.storeHistoryLocally} onChange={(v) => set({ storeHistoryLocally: v })} label="Save conversation history" />}
+            </Field>
+            <Field
+              label="Require approval for high-risk actions"
+              description={
+                <span className="inline-flex items-center gap-1.5">
+                  Deleting files, running commands and controlling apps always ask first. <UiOnly />
+                </span>
+              }
+              inline
+            >
+              {() => (
+                <Switch
+                  checked={s.requireApprovalForHighRisk}
+                  onChange={(v) => {
+                    set({
+                      requireApprovalForHighRisk: v,
+                      permissions: v
+                        ? s.permissions.map((p) => (p.risk === "high" && p.level === "allow" ? { ...p, level: "ask" } : p))
+                        : s.permissions,
+                    });
+                  }}
+                  label="Require approval for high-risk actions"
+                />
+              )}
+            </Field>
+            <Field
+              label="Sandbox mode"
+              description={
+                <span className="inline-flex items-center gap-1.5">
+                  Restrict file access to approved folders. <UiOnly />
+                </span>
+              }
+              inline
+            >
+              {() => <Switch checked={s.sandboxMode} onChange={(v) => set({ sandboxMode: v })} label="Sandbox mode" />}
+            </Field>
+            <Field
+              label="Max steps per task"
+              description={
+                <span className="inline-flex items-center gap-1.5">
+                  Stop a task after this many tool calls. <UiOnly />
+                </span>
+              }
+              inline
+            >
+              {(id) => (
+                <Input
+                  id={id}
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={s.maxStepsPerTask}
+                  onChange={(e) => set({ maxStepsPerTask: Math.max(1, Math.min(100, Number(e.target.value) || 1)) })}
+                  className="w-20 text-right"
+                />
+              )}
+            </Field>
+            <Field label="Clear conversation history" description="Delete all chats and tasks stored on this device." inline>
+              {() => (
+                <Button variant="danger-ghost" onClick={() => setConfirmClear(true)}>
+                  Clear…
+                </Button>
+              )}
+            </Field>
+          </Section>
+        </div>
+      </div>
+
+      <ConfirmDialog
+        open={confirmReset}
+        onClose={() => setConfirmReset(false)}
+        onConfirm={() => {
+          actions.resetSettings();
+          toast("Settings reset to defaults", "success");
+        }}
+        title="Reset settings?"
+        description="All preferences return to their defaults. Conversations and automations are kept."
+        confirmLabel="Reset"
+      />
+      <ConfirmDialog
+        open={confirmClear}
+        onClose={() => setConfirmClear(false)}
+        onConfirm={() => {
+          actions.clearAllData();
+          toast("Conversation history cleared", "success");
+        }}
+        title="Clear conversation history?"
+        description="This permanently deletes every conversation and task on this device."
+        confirmLabel="Clear history"
+      />
+    </Page>
+  );
+}

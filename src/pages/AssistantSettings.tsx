@@ -3,7 +3,25 @@ import { RefreshCw, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog, useToast } from "../components/ui/overlays";
 import { Field, Input, Select, Switch } from "../components/ui/primitives";
-import { assistantService, googleService, graphService, type AuditEntry, type GoogleStatus, type GraphStatus, type MemoryNote } from "../services/tauri/assistant";
+import {
+  assistantService,
+  featureService,
+  googleService,
+  graphService,
+  type AuditEntry,
+  type ClipHistoryView,
+  type GoogleStatus,
+  type GraphStatus,
+  type MemoryNote,
+  type OrganizeRule,
+  type UndoEntry,
+  type LayoutWindow,
+  type LayoutPreviewRow,
+  type DocResult,
+} from "../services/tauri/assistant";
+import { backend } from "../services";
+import type { Settings } from "../types";
+import { speak, stopSpeaking, voices } from "../lib/speech";
 import { useStore } from "../store/AppStore";
 import { useWorkflows } from "../store/WorkflowStore";
 import { useSchedules } from "../store/ScheduleStore";
@@ -34,7 +52,7 @@ export function MemorySection() {
     <Section
       id="memory"
       title="Memory"
-      description="Notes the assistant keeps across conversations. It can only add or remove notes with your approval; they're sent to the AI provider as context. Don't store secrets here."
+      description="Preferences, reusable instructions, preferred apps and context the assistant keeps across conversations. It can only add or remove notes with your approval and never saves sensitive personal details on its own; enabled notes are sent to the AI provider as context. Disable a note to keep it without using it. Don't store secrets here."
     >
       <div className="flex flex-wrap items-end gap-2 py-4">
         <div className="min-w-48 flex-1">
@@ -42,6 +60,8 @@ export function MemorySection() {
         </div>
         <Select aria-label="Category" value={category} onChange={(e) => setCategory(e.target.value)}>
           <option value="preference">Preference</option>
+          <option value="instruction">Reusable instruction</option>
+          <option value="app">Preferred app</option>
           <option value="project">Project</option>
           <option value="task">Ongoing task</option>
           <option value="other">Other</option>
@@ -66,7 +86,22 @@ export function MemorySection() {
           {[...items].reverse().map((m) => (
             <li key={m.id} className="flex items-start gap-2 py-1.5 text-sm">
               <span className="mt-0.5 shrink-0 rounded bg-surface-3 px-1.5 text-xs text-fg-muted">{m.category}</span>
-              <span className="min-w-0 flex-1">{m.text}</span>
+              <span className={m.enabled ? "min-w-0 flex-1" : "min-w-0 flex-1 text-fg-subtle line-through"}>{m.text}</span>
+              <Switch
+                label={m.enabled ? "In use" : "Disabled"}
+                checked={m.enabled}
+                onChange={(v) => void assistantService.memoryUpdate(m.id, { enabled: v }).then(reload).catch((e) => toast(message(e), "error"))}
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  const next = window.prompt("Edit memory", m.text);
+                  if (next !== null && next.trim() && next !== m.text) void assistantService.memoryUpdate(m.id, { text: next }).then(reload).catch((e) => toast(message(e), "error"));
+                }}
+              >
+                Edit
+              </Button>
               <span className="shrink-0 text-xs text-fg-subtle">
                 {m.source === "assistant" ? "approved in chat" : "added by you"} · {new Date(m.createdAt).toLocaleDateString()}
               </span>
@@ -344,7 +379,7 @@ export function GoogleSection() {
   );
 }
 
-type DataKind = "chats" | "workflows" | "schedules" | "memory" | "activity" | "microsoft" | "google";
+type DataKind = "chats" | "workflows" | "schedules" | "memory" | "activity" | "clipboard" | "microsoft" | "google";
 
 /** Separate, confirmed deletion for each kind of stored data. */
 export function DataSection() {
@@ -384,6 +419,12 @@ export function DataSection() {
       detail: "The audit history of tool calls (audit.log).",
       confirm: "The activity log and its rotated copy are deleted.",
       run: () => assistantService.auditClear(),
+    },
+    clipboard: {
+      label: "Clipboard history",
+      detail: "Items kept in memory while history is on (never on disk).",
+      confirm: "All clipboard history items, pinned ones included, are forgotten. Your current clipboard isn't changed.",
+      run: () => featureService.clipClear(),
     },
     microsoft: {
       label: "Microsoft 365 connection",
@@ -430,6 +471,533 @@ export function DataSection() {
         title={current ? `Delete ${current.label.toLowerCase()}?` : ""}
         description={current?.confirm ?? ""}
         confirmLabel="Delete"
+      />
+    </Section>
+  );
+}
+
+export function ClipboardSection() {
+  const { state, actions } = useStore();
+  const toast = useToast();
+  const on = state.settings.clipboardHistory;
+  const [view, setView] = useState<ClipHistoryView | null>(null);
+  const [query, setQuery] = useState("");
+  const reload = () => void featureService.clipHistory(query).then(setView).catch(() => setView(null));
+  useEffect(reload, [on, query]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!on) return;
+    const t = setInterval(reload, 3000);
+    return () => clearInterval(t);
+  }, [on, query]); // eslint-disable-line react-hooks/exhaustive-deps
+  useDataChanged(reload);
+  const act = (p: Promise<unknown>) => void p.then(reload).catch((e) => toast(message(e), "error"));
+
+  return (
+    <Section
+      id="clipboard"
+      title="Clipboard history"
+      description="Off by default. When on, copied text and images are kept in memory only (never saved to disk) and forgotten when you turn it off or quit. Content that apps mark as private (password managers) is never captured; text that looks like a password, key or card number is skipped. The assistant can only search it with the Clipboard permission, and asks every time."
+    >
+      <Field inline label="Keep clipboard history" description="Up to 50 items and 5 images; pinned items stay until deleted.">
+        {() => <Switch label="Keep clipboard history" checked={on} disabled={!assistantService.available} onChange={(v) => actions.updateSettings({ clipboardHistory: v })} />}
+      </Field>
+      {on && view && (
+        <div className="space-y-2 py-3">
+          <div className="flex gap-2">
+            <Input aria-label="Search clipboard history" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…" />
+            <Button variant="danger-ghost" onClick={() => act(featureService.clipClear())}>
+              Clear
+            </Button>
+          </div>
+          {view.skippedSensitive > 0 && <p className="text-xs text-fg-subtle">{view.skippedSensitive} item(s) skipped because they looked sensitive.</p>}
+          {view.items.length === 0 ? (
+            <p className="text-sm text-fg-muted">Nothing copied yet.</p>
+          ) : (
+            <ul className="max-h-80 space-y-1 overflow-y-auto">
+              {view.items.map((i) => (
+                <li key={i.id} className="flex items-start gap-2 rounded-md border border-border px-2 py-1.5 text-sm">
+                  <div className="min-w-0 flex-1">
+                    {i.kind === "text" ? (
+                      <p className="line-clamp-2 whitespace-pre-wrap break-words">{i.text}</p>
+                    ) : i.preview ? (
+                      <img src={i.preview} alt={`Copied image ${i.width}×${i.height}`} className="max-h-24 rounded" />
+                    ) : (
+                      <p className="text-fg-muted">
+                        Image {i.width}×{i.height}
+                      </p>
+                    )}
+                    <p className="text-[11px] text-fg-subtle">
+                      {new Date(i.at).toLocaleTimeString()}
+                      {i.pinned ? " · pinned" : ""}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => act(featureService.clipRestore(i.id).then(() => toast("Copied back to the clipboard", "success")))}>
+                    Copy
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => act(featureService.clipPin(i.id, !i.pinned))}>
+                    {i.pinned ? "Unpin" : "Pin"}
+                  </Button>
+                  <Button size="icon-sm" variant="danger-ghost" aria-label="Delete item" icon={<Trash2 className="size-3.5" />} onClick={() => act(featureService.clipDelete(i.id))} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+const newRule = (): OrganizeRule => ({ id: `rule-${Date.now()}`, name: "", path: "", by: "extension" });
+
+export function FileRulesSection() {
+  const toast = useToast();
+  const [rules, setRules] = useState<OrganizeRule[]>([]);
+  const [draft, setDraft] = useState<OrganizeRule | null>(null);
+  const [preview, setPreview] = useState<{ rule: OrganizeRule; text: string } | null>(null);
+  const [undo, setUndo] = useState<UndoEntry[]>([]);
+  const [undoPreview, setUndoPreview] = useState<{ id: number; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const reload = () => {
+    void featureService.rulesLoad().then(setRules).catch(() => {});
+    void featureService.undoList().then(setUndo).catch(() => {});
+  };
+  useEffect(reload, []);
+  const save = (next: OrganizeRule[]) => void featureService.rulesSave(next).then(() => setRules(next)).catch((e) => toast(message(e), "error"));
+  const run = <T,>(p: Promise<T>, done: (v: T) => void) => {
+    setBusy(true);
+    void p
+      .then(done)
+      .catch((e) => toast(message(e), "error"))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Section
+      id="rules"
+      title="File rules"
+      description="Saved rules that sort a folder's files into subfolders (by type, date or your own pattern). Applying always shows every move first and asks; changes can be undone below. The assistant can use the same organizing with your file permissions."
+    >
+      <ul className="py-2">
+        {rules.length === 0 && <li className="py-2 text-sm text-fg-muted">No rules yet.</li>}
+        {rules.map((r) => (
+          <li key={r.id} className="flex flex-wrap items-center gap-2 py-1.5 text-sm">
+            <span className="min-w-0 flex-1">
+              <span className="font-medium">{r.name || "Unnamed rule"}</span>
+              <span className="text-fg-muted">
+                {" "}
+                · {r.path} · by {r.by === "pattern" ? `pattern “${r.target}”` : r.by}
+                {r.extensions?.length ? ` · ${r.extensions.join(", ")}` : ""}
+                {r.pattern ? ` · ${r.pattern}` : ""}
+              </span>
+            </span>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => run(featureService.rulePreview(r), (text) => setPreview({ rule: r, text }))}>
+              Preview & apply
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setDraft({ ...r })}>
+              Edit
+            </Button>
+            <Button size="icon-sm" variant="danger-ghost" aria-label="Delete rule" icon={<Trash2 className="size-3.5" />} onClick={() => save(rules.filter((x) => x.id !== r.id))} />
+          </li>
+        ))}
+      </ul>
+      {draft ? (
+        <div className="space-y-1 py-3">
+          <Field label="Name">{(id) => <Input id={id} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="Sort downloads" />}</Field>
+          <Field label="Folder" description="Full path inside an allowed folder.">
+            {(id) => <Input id={id} value={draft.path} onChange={(e) => setDraft({ ...draft, path: e.target.value })} placeholder="C:\Users\me\Downloads" />}
+          </Field>
+          <Field label="Sort by">
+            {(id) => (
+              <Select id={id} value={draft.by} onChange={(e) => setDraft({ ...draft, by: e.target.value as OrganizeRule["by"] })}>
+                <option value="extension">File type (extension)</option>
+                <option value="year">Year modified</option>
+                <option value="month">Month modified</option>
+                <option value="pattern">Custom folder pattern</option>
+              </Select>
+            )}
+          </Field>
+          {draft.by === "pattern" && (
+            <Field label="Target folder pattern" description="Tokens: {ext} {year} {month} {date} {name}. Example: Photos/{year}/{month}">
+              {(id) => <Input id={id} value={draft.target ?? ""} onChange={(e) => setDraft({ ...draft, target: e.target.value })} />}
+            </Field>
+          )}
+          <Field label="Only extensions (optional)" description="Comma-separated, e.g. jpg, png">
+            {(id) => (
+              <Input
+                id={id}
+                value={(draft.extensions ?? []).join(", ")}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    extensions: e.target.value
+                      .split(",")
+                      .map((x) => x.trim())
+                      .filter(Boolean),
+                  })
+                }
+              />
+            )}
+          </Field>
+          <Field label="Name pattern (optional)" description="e.g. invoice* or *.pdf">
+            {(id) => <Input id={id} value={draft.pattern ?? ""} onChange={(e) => setDraft({ ...draft, pattern: e.target.value })} />}
+          </Field>
+          <div className="flex gap-2 pt-2">
+            <Button
+              variant="primary"
+              disabled={!draft.path.trim() || (draft.by === "pattern" && !draft.target?.trim())}
+              onClick={() => {
+                save(rules.some((r) => r.id === draft.id) ? rules.map((r) => (r.id === draft.id ? draft : r)) : [...rules, draft]);
+                setDraft(null);
+              }}
+            >
+              Save rule
+            </Button>
+            <Button variant="ghost" onClick={() => setDraft(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="py-3">
+          <Button size="sm" variant="outline" disabled={!assistantService.available} onClick={() => setDraft(newRule())}>
+            New rule
+          </Button>
+        </div>
+      )}
+      <div className="py-3">
+        <p className="mb-1 text-sm font-medium">Undo history</p>
+        {undo.length === 0 ? (
+          <p className="text-sm text-fg-muted">No recent moves, renames or organizing to undo.</p>
+        ) : (
+          <ul className="space-y-1 text-sm">
+            {undo.map((u) => (
+              <li key={u.id} className="flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate">
+                  {u.label} <span className="text-fg-subtle">· {new Date(u.at).toLocaleString()}</span>
+                </span>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(featureService.undoPreview(u.id), (text) => setUndoPreview({ id: u.id, text }))}>
+                  Undo…
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <ConfirmDialog
+        open={preview !== null}
+        onClose={() => setPreview(null)}
+        onConfirm={() =>
+          preview &&
+          run(featureService.ruleApply(preview.rule), (r) => {
+            toast(`Moved ${r.moved} file(s)${r.failed ? `, ${r.failed} failed` : ""}`, r.failed ? "error" : "success");
+            reload();
+          })
+        }
+        title="Apply this rule?"
+        description={<span className="block max-h-64 overflow-y-auto whitespace-pre-wrap text-xs">{preview?.text}</span>}
+        confirmLabel="Move files"
+      />
+      <ConfirmDialog
+        open={undoPreview !== null}
+        onClose={() => setUndoPreview(null)}
+        onConfirm={() =>
+          undoPreview &&
+          run(featureService.undoApply(undoPreview.id), (r) => {
+            toast(`Moved ${r.moved} file(s) back${r.failed ? `, ${r.failed} failed` : ""}`, r.failed ? "error" : "success");
+            reload();
+          })
+        }
+        title="Undo these changes?"
+        description={<span className="block max-h-64 overflow-y-auto whitespace-pre-wrap text-xs">{undoPreview?.text}</span>}
+        confirmLabel="Move back"
+      />
+    </Section>
+  );
+}
+
+const SHORTCUT_LABELS: Record<keyof Settings["shortcuts"], string> = {
+  summon: "Show JARVIS",
+  voice: "Start voice input",
+  pause: "Pause the running workflow",
+  stop: "Stop all automation",
+};
+
+export function ShortcutsSection() {
+  const { state, actions } = useStore();
+  const s = state.settings;
+  const [draft, setDraft] = useState(s.shortcuts);
+  useEffect(() => setDraft(s.shortcuts), [s.shortcuts]);
+  return (
+    <Section
+      id="shortcuts"
+      title="Global shortcuts"
+      description="Work anywhere in Windows while the app runs (also from the tray). Format: CommandOrControl+Alt+J. Shortcuts already used by another app can't be registered. Ctrl+Alt acts like AltGr on some keyboard layouts."
+    >
+      <Field inline label="Enable global shortcuts">
+        {() => <Switch label="Enable global shortcuts" checked={s.globalShortcuts} disabled={!assistantService.available} onChange={(v) => actions.updateSettings({ globalShortcuts: v })} />}
+      </Field>
+      {(Object.keys(SHORTCUT_LABELS) as (keyof Settings["shortcuts"])[]).map((k) => (
+        <Field key={k} inline label={SHORTCUT_LABELS[k]}>
+          {(id) => <Input id={id} className="w-64" value={draft[k]} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} placeholder="(none)" />}
+        </Field>
+      ))}
+      <div className="py-3">
+        <Button size="sm" variant="outline" onClick={() => actions.updateSettings({ shortcuts: draft })}>
+          Save shortcuts
+        </Button>
+      </div>
+    </Section>
+  );
+}
+
+export function VoiceSection() {
+  const { state, actions } = useStore();
+  const s = state.settings;
+  const [voiceList, setVoiceList] = useState<SpeechSynthesisVoice[]>(voices());
+  useEffect(() => {
+    if (typeof speechSynthesis === "undefined") return;
+    const update = () => setVoiceList(voices());
+    speechSynthesis.addEventListener("voiceschanged", update);
+    return () => speechSynthesis.removeEventListener("voiceschanged", update);
+  }, []);
+  return (
+    <Section
+      id="voice"
+      title="Voice"
+      description="Push-to-talk uses Windows speech recognition (needs a microphone and Settings → Privacy & security → Speech → Online speech recognition). Audio isn't stored by this app. Replies are read with the voices installed in Windows."
+    >
+      <Field inline label="Voice input" description="Shows a microphone button in the chat box; click to talk, click again to cancel.">
+        {() => <Switch label="Voice input" checked={s.voiceInput} disabled={!assistantService.available} onChange={(v) => actions.updateSettings({ voiceInput: v })} />}
+      </Field>
+      <Field inline label="Send immediately" description="Send recognized speech without editing it first.">
+        {() => <Switch label="Send immediately" checked={s.autoSendVoice} onChange={(v) => actions.updateSettings({ autoSendVoice: v })} />}
+      </Field>
+      <Field inline label="Read replies aloud" description="Speaking stops when you talk, send a message or press Stop.">
+        {() => (
+          <Switch
+            label="Read replies aloud"
+            checked={s.speakReplies}
+            onChange={(v) => {
+              if (!v) stopSpeaking();
+              actions.updateSettings({ speakReplies: v });
+            }}
+          />
+        )}
+      </Field>
+      <Field label="Voice">
+        {(id) => (
+          <Select id={id} value={s.voiceName} onChange={(e) => actions.updateSettings({ voiceName: e.target.value })}>
+            <option value="">System default</option>
+            {voiceList.map((v) => (
+              <option key={v.name} value={v.name}>
+                {v.name} ({v.lang})
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      <Field label={`Speed (${s.speechRate.toFixed(1)}×)`}>
+        {(id) => (
+          <input id={id} type="range" min={0.5} max={2} step={0.1} value={s.speechRate} onChange={(e) => actions.updateSettings({ speechRate: Number(e.target.value) })} className="w-full" />
+        )}
+      </Field>
+      <div className="py-3">
+        <Button size="sm" variant="outline" onClick={() => speak("Hello, I'm your assistant. This is how I sound.", s.voiceName, s.speechRate)}>
+          Test voice
+        </Button>
+      </div>
+    </Section>
+  );
+}
+
+interface SavedLayout {
+  name: string;
+  windows: LayoutWindow[];
+}
+
+/** Named window layouts: capture the open windows, preview, then arrange. */
+export function WorkspacesSection() {
+  const { state } = useStore();
+  const toast = useToast();
+  const [layouts, setLayouts] = useState<SavedLayout[]>([]);
+  const [name, setName] = useState("");
+  const [preview, setPreview] = useState<{ layout: SavedLayout; rows: LayoutPreviewRow[] } | null>(null);
+  const [launchMissing, setLaunchMissing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    void featureService.layoutsLoad().then(setLayouts).catch(() => {});
+  }, []);
+  const save = (next: SavedLayout[]) => void featureService.layoutsSave(next).then(() => setLayouts(next)).catch((e) => toast(message(e), "error"));
+  const allowed = state.settings.allowedApps.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  return (
+    <Section
+      id="workspaces"
+      title="Workspaces"
+      description="Save the positions of your open windows under a name and restore them later. Restoring shows what will move first. Missing apps are only reported, or launched if they're on your allowed-apps list. Virtual desktops can't be restored (Windows only lets apps move their own windows between desktops)."
+    >
+      <div className="flex gap-2 py-4">
+        <Input aria-label="Layout name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Name, e.g. Writing" />
+        <Button
+          variant="primary"
+          disabled={!name.trim() || busy || !assistantService.available}
+          onClick={() => {
+            setBusy(true);
+            void featureService
+              .layoutCapture()
+              .then((windows) => {
+                save([...layouts.filter((l) => l.name !== name.trim()), { name: name.trim(), windows }]);
+                toast(`Saved ${windows.length} windows as “${name.trim()}”`, "success");
+                setName("");
+              })
+              .catch((e) => toast(message(e), "error"))
+              .finally(() => setBusy(false));
+          }}
+        >
+          Save current windows
+        </Button>
+      </div>
+      {layouts.length === 0 ? (
+        <p className="py-3 text-sm text-fg-muted">No saved layouts.</p>
+      ) : (
+        <ul className="py-2">
+          {layouts.map((l) => (
+            <li key={l.name} className="flex items-center justify-between gap-2 py-1.5 text-sm">
+              <span>
+                <span className="font-medium">{l.name}</span> <span className="text-fg-muted">· {l.windows.length} windows</span>
+              </span>
+              <span className="flex gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void featureService.layoutPreview(l.windows).then((rows) => setPreview({ layout: l, rows })).catch((e) => toast(message(e), "error"))}
+                >
+                  Preview & restore
+                </Button>
+                <Button size="icon-sm" variant="danger-ghost" aria-label="Delete layout" icon={<Trash2 className="size-3.5" />} onClick={() => save(layouts.filter((x) => x.name !== l.name))} />
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <ConfirmDialog
+        open={preview !== null}
+        onClose={() => setPreview(null)}
+        onConfirm={() => {
+          if (!preview) return;
+          setBusy(true);
+          void featureService
+            .layoutApply(preview.layout.windows, launchMissing, allowed)
+            .then((r) => toast(`Arranged ${r.arranged} of ${preview.layout.windows.length} windows${r.launched?.length ? `, launched ${r.launched.length}` : ""}`, "success"))
+            .catch((e) => toast(message(e), "error"))
+            .finally(() => setBusy(false));
+        }}
+        title={`Restore “${preview?.layout.name ?? ""}”?`}
+        description={
+          <span className="block max-h-64 space-y-1 overflow-y-auto text-xs">
+            {preview?.rows.map((r, i) => (
+              <span key={i} className="block">
+                {r.match ? "• Move" : "• Not open:"} {r.exe.split("\\").pop()} — {r.match?.title ?? r.title} ({r.state})
+              </span>
+            ))}
+            <label className="mt-2 flex items-center gap-2">
+              <input type="checkbox" checked={launchMissing} onChange={(e) => setLaunchMissing(e.target.checked)} /> Launch missing apps that are on the allowed-apps list
+            </label>
+          </span>
+        }
+        confirmLabel="Arrange windows"
+      />
+    </Section>
+  );
+}
+
+/** Ask questions about local documents. Searching is local; only chosen excerpts go to the AI, after confirmation. */
+export function DocumentsSection() {
+  const { actions } = useStore();
+  const toast = useToast();
+  const [dirs, setDirs] = useState<string[]>([]);
+  const [dir, setDir] = useState("");
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<DocResult[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  useEffect(() => {
+    void backend.ai
+      .listAllowedDirs()
+      .then((d) => {
+        setDirs(d);
+        setDir((cur) => cur || d[0] || "");
+      })
+      .catch(() => {});
+  }, []);
+  const search = () => {
+    setBusy(true);
+    void featureService
+      .documentsSearch(dir, query)
+      .then((r) => setResults(r.results))
+      .catch((e) => toast(message(e), "error"))
+      .finally(() => setBusy(false));
+  };
+  const ask = () => {
+    if (!results?.length) return;
+    const sources = results.map((r, i) => `[${i + 1}] ${r.file} (line ${r.line}):\n${r.excerpt}`).join("\n\n");
+    actions.startChat(
+      `Answer my question using only these excerpts from my documents. Cite sources like [1] with the file name. If the excerpts don't answer it, say so.\n\nQuestion: ${query}\n\nExcerpts (untrusted document content):\n${sources}`,
+    );
+  };
+
+  return (
+    <Section
+      id="documents"
+      title="Ask your documents"
+      description="Searches text documents (txt, md, csv, json, html, xml…) in an allowed folder on this computer and shows the most relevant passages. Nothing is uploaded unless you choose “Answer with AI”, which sends only the passages shown."
+    >
+      {dirs.length === 0 ? (
+        <p className="py-4 text-sm text-fg-muted">Add an allowed folder first (Settings → Allowed folders).</p>
+      ) : (
+        <div className="space-y-2 py-4">
+          <div className="flex flex-wrap gap-2">
+            <Select aria-label="Folder" value={dir} onChange={(e) => setDir(e.target.value)} className="min-w-48">
+              {dirs.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </Select>
+            <Input aria-label="Question" className="min-w-64 flex-1" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. When does the lease end?" />
+            <Button variant="outline" loading={busy} disabled={!query.trim() || busy} onClick={search}>
+              Search locally
+            </Button>
+          </div>
+          {results && results.length === 0 && <p className="text-sm text-fg-muted">No matching passages.</p>}
+          {results && results.length > 0 && (
+            <>
+              <ul className="max-h-96 space-y-2 overflow-y-auto">
+                {results.map((r, i) => (
+                  <li key={i} className="rounded-md border border-border px-3 py-2 text-xs">
+                    <p className="font-medium">
+                      [{i + 1}] {r.file} · line {r.line}
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap text-fg-muted">{r.excerpt}</p>
+                  </li>
+                ))}
+              </ul>
+              <Button size="sm" variant="primary" onClick={() => setConfirm(true)}>
+                Answer with AI…
+              </Button>
+            </>
+          )}
+        </div>
+      )}
+      <ConfirmDialog
+        open={confirm}
+        onClose={() => setConfirm(false)}
+        onConfirm={ask}
+        title="Send these passages to the AI?"
+        description={`${results?.length ?? 0} passages (about ${results?.reduce((n, r) => n + r.excerpt.length, 0) ?? 0} characters) and your question will be sent to the AI provider to write an answer.`}
+        confirmLabel="Send and answer"
       />
     </Section>
   );

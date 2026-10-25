@@ -50,7 +50,7 @@ pub mod ctx {
 
 /// Tools that may run for minutes (bulk file work): longer limit, progress, Stop between items.
 pub fn is_long_running(name: &str) -> bool {
-    matches!(name, "search_files" | "find_duplicates" | "move_files" | "copy_files" | "delete_files" | "rename_files" | "organize_files")
+    matches!(name, "search_files" | "find_duplicates" | "move_files" | "copy_files" | "delete_files" | "rename_files" | "organize_files" | "undo_file_changes" | "document_search")
 }
 pub const LONG_TOOL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub mod paths;
@@ -738,11 +738,11 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "organize_files",
         title: "Organize folder",
-        description: "Move the files of a permitted folder into subfolders by extension, year or month (created as needed). The user sees every move first; never overwrites.",
+        description: "Move the files of a permitted folder into subfolders by extension, year, month, or a pattern target like Photos/{year}/{month} ({name} {ext} {date} {year} {month}); optional extensions filter. The user sees every move first; never overwrites; can be undone with undo_file_changes.",
         kind: ToolKind::Write,
         parameters: || json!({
             "type": "object",
-            "properties": { "path": { "type": "string" }, "by": { "type": "string", "enum": ["extension", "year", "month"] }, "pattern": { "type": "string" } },
+            "properties": { "path": { "type": "string" }, "by": { "type": "string", "enum": ["extension", "year", "month", "pattern"] }, "pattern": { "type": "string" }, "extensions": { "type": "array", "items": { "type": "string" } }, "target": { "type": "string" } },
             "required": ["path", "by"],
             "additionalProperties": false
         }),
@@ -803,6 +803,114 @@ pub const TOOLS: &[ToolSpec] = &[
         parameters: || json!({
             "type": "object",
             "properties": { "action": { "type": "string", "enum": ["sleep", "restart", "shutdown", "cancel_shutdown"] } },
+            "required": ["action"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "clipboard_history",
+        title: "Clipboard history",
+        description: "Search the user's clipboard history (only if they turned it on). Returns ids, text and image sizes. Always asks.",
+        kind: ToolKind::Clipboard,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "clipboard_restore",
+        title: "Restore clipboard item",
+        description: "Put an earlier clipboard history item (text or image) back on the clipboard, e.g. before pasting with app_input keys ctrl+v.",
+        kind: ToolKind::Clipboard,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "id": { "type": "integer" } },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "open_file",
+        title: "Open document",
+        description: "Open a document from a permitted folder with its default app (e.g. a .docx in Word). Programs and scripts are refused.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "app_menu",
+        title: "Use menu",
+        description: "Run a menu command by its path, e.g. [\"File\", \"Save As\"] (works with popup menus; accelerators and shortcut text are ignored). Always asks; read the window afterwards to confirm.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "window": { "type": "integer", "description": "Window handle from app_list_windows." }, "path": { "type": "array", "items": { "type": "string" } } },
+            "required": ["window", "path"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "app_fill_form",
+        title: "Fill form",
+        description: "Fill several text fields of a window/dialog by their labels (e.g. File name, Subject). All fields are matched before anything changes; values are read back; password fields are refused; nothing is submitted. Always asks.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "window": { "type": "integer", "description": "Window handle from app_list_windows." }, "fields": { "type": "array", "items": { "type": "object", "properties": { "label": { "type": "string" }, "value": { "type": "string" } }, "required": ["label", "value"], "additionalProperties": false } } },
+            "required": ["window", "fields"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "list_file_changes",
+        title: "Undo history",
+        description: "List recent move/rename/organize changes that can be undone (id, label, number of moves).",
+        kind: ToolKind::Read,
+        parameters: || json!({
+            "type": "object",
+            "properties": {  },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "undo_file_changes",
+        title: "Undo file changes",
+        description: "Move the files of an earlier move/rename/organize change (by id from list_file_changes) back. Shows every move first; refuses if something would be overwritten.",
+        kind: ToolKind::Write,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "id": { "type": "integer" } },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "document_search",
+        title: "Search documents",
+        description: "Find the most relevant paragraphs for a question in the text documents (txt, md, csv, json, html, xml…) of a permitted folder, ranked locally. Returns file names, line numbers and excerpts to answer from and cite.",
+        kind: ToolKind::Read,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" }, "query": { "type": "string" }, "top": { "type": "integer", "description": "1-12, default 6." } },
+            "required": ["path", "query"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "workspace_layouts",
+        title: "Workspace layouts",
+        description: "List the user's saved window layouts, or apply one by name (arranges matching open windows; with launch_missing, also starts missing apps that are on the allowed-apps list). Apply asks first.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "action": { "type": "string", "enum": ["list", "apply"] }, "name": { "type": "string" }, "launch_missing": { "type": "boolean" } },
             "required": ["action"],
             "additionalProperties": false
         }),
@@ -891,6 +999,9 @@ pub fn execute(spec: &ToolSpec, args: &Value, guard: &PathGuard) -> Result<ToolO
         "delete_files" => fs_ops::delete_files(guard, parse(args)?),
         "rename_files" => fs_ops::rename_files(guard, parse(args)?),
         "organize_files" => fs_ops::organize_files(guard, parse(args)?),
+        "list_file_changes" => fs_ops::list_changes_tool(),
+        "document_search" => fs_ops::document_search(guard, parse(args)?),
+        "undo_file_changes" => fs_ops::undo_tool(guard, args),
         other => Err(ToolError::invalid(format!("Unknown tool `{other}`."))),
     }
 }

@@ -271,6 +271,9 @@ mod imp {
     pub fn lock() -> Result<(), ToolError> {
         Err(unsupported())
     }
+    pub fn trigger_state() -> Result<Value, ToolError> {
+        Err(unsupported())
+    }
     pub fn audio_devices() -> Result<Value, ToolError> {
         Err(unsupported())
     }
@@ -671,6 +674,29 @@ mod imp {
         }
     }
 
+    pub fn trigger_state() -> Result<Value, ToolError> {
+        let mut names: Vec<String> = processes().into_iter().map(|(_, n)| n.to_lowercase()).collect();
+        names.sort();
+        names.dedup();
+        let mask = unsafe { GetLogicalDrives() };
+        let mut free = Vec::new();
+        for i in 0..26u32 {
+            if mask & (1 << i) == 0 {
+                continue;
+            }
+            let root = format!("{}:\\", (b'A' + i as u8) as char);
+            let h = HSTRING::from(root.as_str());
+            if unsafe { GetDriveTypeW(&h) } != DRIVE_FIXED {
+                continue;
+            }
+            let (mut f, mut t) = (0u64, 0u64);
+            if unsafe { GetDiskFreeSpaceExW(&h, None, Some(&mut t), Some(&mut f)) }.is_ok() {
+                free.push(json!({ "drive": root, "free_gb": f / 1_073_741_824 }));
+            }
+        }
+        Ok(json!({ "processes": names, "battery": battery(), "drives": free }))
+    }
+
     pub fn lock() -> Result<(), ToolError> {
         unsafe { windows::Win32::System::Shutdown::LockWorkStation() }
             .map_err(|e| ToolError::new("system_error", format!("Couldn't lock: {e}")))
@@ -766,6 +792,15 @@ mod imp {
         }
         Ok(name)
     }
+}
+
+/// Cheap state for proactive triggers: running process names, battery, free disk space.
+#[tauri::command]
+pub async fn trigger_state() -> Result<Value, crate::error::AppError> {
+    tauri::async_runtime::spawn_blocking(imp::trigger_state)
+        .await
+        .map_err(|e| crate::error::AppError::internal(e.to_string()))?
+        .map_err(|e| crate::error::AppError::internal(e.message))
 }
 
 /// Read-only system snapshot for the Command Center (the user's own request, not a model tool call).

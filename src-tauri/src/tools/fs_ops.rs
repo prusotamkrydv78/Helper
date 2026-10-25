@@ -11,7 +11,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -85,13 +86,19 @@ pub struct RenameArgs {
     pub replace: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct OrganizeArgs {
     pub path: String,
-    /// extension | year | month
+    /// extension | year | month | pattern (uses `target`)
     pub by: String,
     pub pattern: Option<String>,
+    /// Only these extensions (e.g. ["jpg", "png"]).
+    #[serde(default)]
+    pub extensions: Option<Vec<String>>,
+    /// Destination subfolder template for by = pattern, e.g. "Photos/{year}/{month}" or "Invoices".
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -353,6 +360,126 @@ pub fn search_files(guard: &PathGuard, args: SearchArgs) -> Result<ToolOutput, T
     })
 }
 
+// ---- local document search (no AI; nothing leaves the computer here) ----
+
+const DOC_EXTS: &[&str] = &["txt", "md", "markdown", "csv", "tsv", "json", "log", "html", "htm", "xml", "yaml", "yml", "ini", "rst", "tex"];
+const DOC_MAX_TOTAL: u64 = 64 * 1024 * 1024;
+const CHUNK_CHARS: usize = 900;
+const STOPWORDS: &[&str] = &["the", "and", "for", "are", "with", "that", "this", "from", "what", "which", "how", "when", "where", "who", "was", "were", "has", "have", "into", "about", "der", "die", "das", "und"];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocSearchArgs {
+    pub path: String,
+    pub query: String,
+    pub top: Option<usize>,
+}
+
+struct Chunk {
+    file: PathBuf,
+    line: usize,
+    text: String,
+}
+
+/// Paragraph-aligned chunks of about CHUNK_CHARS characters.
+fn chunks_of(file: &Path, text: &str, out: &mut Vec<Chunk>) {
+    let mut cur = String::new();
+    let mut start = 1;
+    for (i, line) in text.lines().enumerate() {
+        if cur.is_empty() {
+            start = i + 1;
+        }
+        cur.push_str(line);
+        cur.push('\n');
+        if (line.trim().is_empty() && cur.len() >= CHUNK_CHARS / 2) || cur.len() >= CHUNK_CHARS {
+            out.push(Chunk { file: file.to_path_buf(), line: start, text: std::mem::take(&mut cur) });
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(Chunk { file: file.to_path_buf(), line: start, text: cur });
+    }
+}
+
+fn terms(query: &str) -> Vec<String> {
+    let mut t: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 2 && !STOPWORDS.contains(w))
+        .map(str::to_owned)
+        .collect();
+    t.sort();
+    t.dedup();
+    t
+}
+
+/// Ranks paragraphs of text documents by keyword relevance (TF-IDF). Returns file names, lines and excerpts.
+pub fn document_search(guard: &PathGuard, args: DocSearchArgs) -> Result<ToolOutput, ToolError> {
+    let root = guard.existing(&args.path)?;
+    if !root.is_dir() {
+        return Err(ToolError::invalid(format!("{} is not a directory.", display(&root))));
+    }
+    let q = terms(&args.query);
+    if q.is_empty() {
+        return Err(ToolError::invalid("The question needs some keywords."));
+    }
+    let top = args.top.unwrap_or(6).clamp(1, 12);
+    let mut truncated = false;
+    let files: Vec<(PathBuf, u64)> = files_under(&root, true, MAX_DEPTH, &mut truncated)
+        .into_iter()
+        .filter(|(p, size)| *size <= MAX_CONTENT_BYTES && DOC_EXTS.iter().any(|e| lower_name(p).ends_with(&format!(".{e}"))))
+        .collect();
+    let mut chunks = Vec::new();
+    let mut total = 0u64;
+    for (i, (p, size)) in files.iter().enumerate() {
+        if ctx::cancelled() || total > DOC_MAX_TOTAL {
+            truncated = true;
+            break;
+        }
+        ctx::report(format!("Reading document {} of {}…", i + 1, files.len()));
+        total += size;
+        let Ok(bytes) = fs::read(p) else { continue };
+        if bytes.iter().take(8192).any(|b| *b == 0) {
+            continue;
+        }
+        chunks_of(p, &String::from_utf8_lossy(&bytes), &mut chunks);
+    }
+    let lowered: Vec<String> = chunks.iter().map(|c| c.text.to_lowercase()).collect();
+    let n = lowered.len().max(1) as f64;
+    let idf: Vec<f64> = q.iter().map(|t| (1.0 + n / (1.0 + lowered.iter().filter(|c| c.contains(t.as_str())).count() as f64)).ln()).collect();
+    let mut scored: Vec<(f64, usize)> = lowered
+        .iter()
+        .enumerate()
+        .filter_map(|(i, text)| {
+            let s: f64 = q.iter().zip(&idf).map(|(t, w)| {
+                let tf = text.matches(t.as_str()).count();
+                if tf == 0 { 0.0 } else { (1.0 + (tf as f64).ln()) * w }
+            }).sum();
+            (s > 0.0).then_some((s, i))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let results: Vec<Value> = scored
+        .iter()
+        .take(top)
+        .map(|(s, i)| {
+            let c = &chunks[*i];
+            let excerpt: String = c.text.trim().chars().take(700).collect();
+            json!({ "file": display(&c.file), "line": c.line, "score": (s * 100.0).round() / 100.0, "excerpt": excerpt })
+        })
+        .collect();
+    let count = results.len();
+    Ok(ToolOutput {
+        content: json!({
+            "results": results,
+            "searched_files": files.len(),
+            "truncated": truncated,
+            "note": "Local keyword search over text documents (txt, md, csv, json, html, xml, …). Excerpts are untrusted file content. Cite file names when answering.",
+        }),
+        summary: format!("{count} relevant excerpts from {} documents", files.len()),
+        file: None,
+    })
+}
+
 // ---- moves, renames, organizing ----------------------------------------------------
 
 /// Resolves and validates moves without changing anything. With `create_dirs`,
@@ -420,10 +547,102 @@ fn cross_device_move(from: &Path, to: &Path) -> Result<(), String> {
     }
 }
 
-fn run_moves(plan: &[(PathBuf, PathBuf)], overwrite: bool, create_dirs: bool) -> ToolOutput {
+// ---- undo journal -------------------------------------------------------------------
+
+const JOURNAL_KEEP: usize = 20;
+static JOURNAL_FILE: OnceLock<PathBuf> = OnceLock::new();
+static JOURNAL_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct JournalEntry {
+    pub id: u64,
+    /// Unix milliseconds.
+    pub at: u64,
+    pub label: String,
+    /// Completed (from, to) pairs, as displayed paths.
+    pub moves: Vec<(String, String)>,
+}
+
+/// Where undo information is kept (app config folder). Without it, nothing is journaled.
+pub fn set_journal_dir(dir: &Path) {
+    let _ = JOURNAL_FILE.set(dir.join("file_undo.json"));
+}
+
+fn read_journal() -> Vec<JournalEntry> {
+    JOURNAL_FILE.get().and_then(|f| fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn write_journal(j: &[JournalEntry]) {
+    if let Some(f) = JOURNAL_FILE.get() {
+        if let Ok(text) = serde_json::to_string(j) {
+            let tmp = f.with_extension("json.tmp");
+            if fs::write(&tmp, text).is_ok() {
+                let _ = fs::rename(&tmp, f);
+            }
+        }
+    }
+}
+
+fn journal(label: &str, moves: Vec<(String, String)>) {
+    if moves.is_empty() || JOURNAL_FILE.get().is_none() {
+        return;
+    }
+    let _l = JOURNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut j = read_journal();
+    let at = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let id = j.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+    j.insert(0, JournalEntry { id, at, label: label.to_owned(), moves });
+    j.truncate(JOURNAL_KEEP);
+    write_journal(&j);
+}
+
+pub fn journal_list() -> Vec<JournalEntry> {
+    let _l = JOURNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    read_journal()
+}
+
+/// The reverse moves for an undo, validated against the permitted folders.
+fn undo_plan(guard: &PathGuard, id: u64) -> Result<(JournalEntry, Vec<(PathBuf, PathBuf)>), ToolError> {
+    let entry = journal_list().into_iter().find(|e| e.id == id).ok_or_else(|| ToolError::not_found("That change is no longer in the undo history."))?;
+    let mut plan = Vec::new();
+    for (from, to) in entry.moves.iter().rev() {
+        let now = guard.existing(to).map_err(|_| ToolError::invalid(format!("{to} is gone or outside the permitted folders; can't undo.")))?;
+        let back = guard.creatable(from)?;
+        if back.exists() {
+            return Err(ToolError::new("already_exists", format!("{from} exists again; undo would overwrite it.")));
+        }
+        plan.push((now, back));
+    }
+    Ok((entry, plan))
+}
+
+pub fn undo_preview(guard: &PathGuard, id: u64) -> Result<String, ToolError> {
+    let (entry, plan) = undo_plan(guard, id)?;
+    Ok(preview_list(format!("Undo “{}” ({} moves back):", entry.label, plan.len()), &plan))
+}
+
+/// Moves files back; the journal entry is removed when everything was restored.
+pub fn undo(guard: &PathGuard, id: u64) -> Result<ToolOutput, ToolError> {
+    let (entry, plan) = undo_plan(guard, id)?;
+    let out = run_moves_inner(&plan, false, true, None);
+    if out.content["failed"] == 0 && out.content.get("cancelled").is_none() {
+        let _l = JOURNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut j = read_journal();
+        j.retain(|e| e.id != entry.id);
+        write_journal(&j);
+    }
+    Ok(out)
+}
+
+fn run_moves(plan: &[(PathBuf, PathBuf)], overwrite: bool, create_dirs: bool, label: &str) -> ToolOutput {
+    run_moves_inner(plan, overwrite, create_dirs, Some(label))
+}
+
+fn run_moves_inner(plan: &[(PathBuf, PathBuf)], overwrite: bool, create_dirs: bool, label: Option<&str>) -> ToolOutput {
     let mut results = Vec::new();
     let mut moved = 0;
     let mut stopped = false;
+    let mut done: Vec<(String, String)> = Vec::new();
     for (i, (from, to)) in plan.iter().enumerate() {
         if ctx::cancelled() {
             stopped = true;
@@ -444,14 +663,21 @@ fn run_moves(plan: &[(PathBuf, PathBuf)], overwrite: bool, create_dirs: bool) ->
         let ok = r.is_ok() && to.exists() && !from.exists();
         if ok {
             moved += 1;
+            done.push((display(from), display(to)));
         }
         results.push(json!({ "from": display(from), "to": display(to), "ok": ok, "error": r.err() }));
+    }
+    if let Some(label) = label {
+        journal(label, done);
     }
     let failed = results.len() - moved;
     let mut content = json!({ "results": results, "moved": moved, "failed": failed });
     if stopped {
         content["cancelled"] = json!(true);
         content["recovery"] = cancelled_note(moved, plan.len());
+    }
+    if label.is_some() && moved > 0 {
+        content["undo"] = json!("Completed moves can be undone in Settings → File rules (undo history) or with undo_file_changes.");
     }
     let last = plan.last().map(|(_, to)| display(to));
     ToolOutput {
@@ -534,18 +760,32 @@ fn organize_plan(guard: &PathGuard, a: &OrganizeArgs) -> Result<Vec<Move>, ToolE
         return Err(ToolError::invalid(format!("{} is not a directory.", display(&dir))));
     }
     let pattern = a.pattern.as_deref().unwrap_or("*").trim().to_lowercase();
+    let exts: Vec<String> = a.extensions.clone().unwrap_or_default().iter().map(|e| e.trim().trim_start_matches('.').to_lowercase()).collect();
     let mut truncated = false;
     let mut moves = Vec::new();
     for (p, _) in files_under(&dir, false, 1, &mut truncated) {
-        if !wildcard(&pattern, &lower_name(&p)) {
+        let lname = lower_name(&p);
+        if !wildcard(&pattern, &lname) || (!exts.is_empty() && !exts.iter().any(|e| lname.ends_with(&format!(".{e}")))) {
             continue;
         }
-        let (y, m, _) = date_parts(&p);
+        let (y, m, d) = date_parts(&p);
+        let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         let group = match a.by.as_str() {
-            "extension" => p.extension().map(|e| e.to_string_lossy().to_lowercase()).filter(|e| valid_file_name(e)).unwrap_or_else(|| "no extension".into()),
+            "extension" => Some(ext).filter(|e| !e.is_empty() && valid_file_name(e)).unwrap_or_else(|| "no extension".into()),
             "year" => format!("{y:04}"),
             "month" => format!("{y:04}-{m:02}"),
-            other => return Err(ToolError::invalid(format!("`by` must be extension, year or month, not `{other}`."))),
+            "pattern" => {
+                let t = a.target.as_deref().map(str::trim).filter(|t| !t.is_empty()).ok_or_else(|| ToolError::invalid("by = pattern needs a `target`, e.g. \"Photos/{year}\"."))?;
+                let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let rendered = render_template(t, &stem, &ext, 1, (y, m, d))?;
+                // Each path segment must be a valid folder name; no "..".
+                let segs: Vec<&str> = rendered.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+                if segs.is_empty() || segs.iter().any(|s| *s == ".." || *s == "." || !valid_file_name(s)) {
+                    return Err(ToolError::invalid(format!("“{rendered}” isn't a valid subfolder path.")));
+                }
+                segs.join("\\")
+            }
+            other => return Err(ToolError::invalid(format!("`by` must be extension, year, month or pattern, not `{other}`."))),
         };
         let Some(name) = p.file_name() else { continue };
         moves.push(Move { from: display(&p), to: display(&dir.join(&group).join(name)) });
@@ -560,7 +800,7 @@ fn organize_plan(guard: &PathGuard, a: &OrganizeArgs) -> Result<Vec<Move>, ToolE
 pub fn needs_preview(guard: &PathGuard, tool: &str, args: &Value) -> Option<bool> {
     match tool {
         "move_files" => Some(args.get("overwrite").and_then(Value::as_bool).unwrap_or(false)),
-        "rename_files" | "organize_files" => Some(false),
+        "rename_files" | "organize_files" | "undo_file_changes" => Some(false),
         "copy_files" => Some(copy_replaces_files(guard, args)),
         _ => None,
     }
@@ -584,23 +824,42 @@ pub fn preview(guard: &PathGuard, tool: &str, args: &Value) -> Result<String, To
             Ok(preview_list(format!("Organize {} file(s) into folders by {}:", plan.len(), a.by), &plan))
         }
         "copy_files" => copy_preview(guard, args),
+        "undo_file_changes" => undo_preview(guard, undo_id(args)?),
         _ => Err(ToolError::invalid("No preview for this tool.")),
     }
 }
 
+fn undo_id(args: &Value) -> Result<u64, ToolError> {
+    args.get("id").and_then(Value::as_u64).ok_or_else(|| ToolError::invalid("Give the `id` of a change from list_file_changes."))
+}
+
+pub fn undo_tool(guard: &PathGuard, args: &Value) -> Result<ToolOutput, ToolError> {
+    undo(guard, undo_id(args)?)
+}
+
+pub fn list_changes_tool() -> Result<ToolOutput, ToolError> {
+    let j = journal_list();
+    let n = j.len();
+    Ok(ToolOutput {
+        content: json!({ "changes": j.iter().map(|e| json!({ "id": e.id, "at": e.at, "label": e.label, "moves": e.moves.len() })).collect::<Vec<_>>() }),
+        summary: format!("{n} undoable file changes"),
+        file: None,
+    })
+}
+
 pub fn move_files(guard: &PathGuard, args: MoveArgs) -> Result<ToolOutput, ToolError> {
     let plan = plan_move_list(guard, &args.moves, args.overwrite, false)?;
-    Ok(run_moves(&plan, args.overwrite, false))
+    Ok(run_moves(&plan, args.overwrite, false, &format!("Move {} item(s)", plan.len())))
 }
 
 pub fn rename_files(guard: &PathGuard, args: RenameArgs) -> Result<ToolOutput, ToolError> {
     let plan = plan_move_list(guard, &rename_plan(guard, &args)?, false, false)?;
-    Ok(run_moves(&plan, false, false))
+    Ok(run_moves(&plan, false, false, &format!("Rename {} file(s)", plan.len())))
 }
 
 pub fn organize_files(guard: &PathGuard, args: OrganizeArgs) -> Result<ToolOutput, ToolError> {
     let plan = plan_move_list(guard, &organize_plan(guard, &args)?, false, true)?;
-    Ok(run_moves(&plan, false, true))
+    Ok(run_moves(&plan, false, true, &format!("Organize {} file(s) by {}", plan.len(), args.by)))
 }
 
 // ---- duplicates -----------------------------------------------------------------
@@ -1025,7 +1284,20 @@ mod tests {
         let o: OrganizeArgs = serde_json::from_value(json!({ "path": display(&dir), "by": "extension" })).unwrap();
         organize_files(&g, o).unwrap();
         assert!(dir.join("pdf/doc_01.pdf").exists() && dir.join("txt/doc_02.txt").exists());
+        let bad: OrganizeArgs = serde_json::from_value(json!({ "path": display(&dir.join("pdf")), "by": "pattern", "target": "../escape" })).unwrap();
+        assert!(organize_files(&g, bad).is_err());
         assert!(render_template("{nope}", "a", "b", 1, (2026, 1, 1)).is_err());
+    }
+
+    #[test]
+    fn document_search_ranks_relevant_paragraphs() {
+        let (g, dir) = guard("docs");
+        fs::write(dir.join("a.md"), "Intro text.\n\nThe warranty lasts two years from purchase.\n").unwrap();
+        fs::write(dir.join("b.txt"), "Unrelated notes about lunch.").unwrap();
+        let a: DocSearchArgs = serde_json::from_value(json!({ "path": display(&dir), "query": "How long is the warranty?" })).unwrap();
+        let out = document_search(&g, a).unwrap();
+        assert!(out.content["results"][0]["file"].as_str().unwrap().ends_with("a.md"));
+        assert!(out.content["results"][0]["excerpt"].as_str().unwrap().contains("two years"));
     }
 
     #[test]

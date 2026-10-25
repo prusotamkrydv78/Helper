@@ -20,6 +20,9 @@ pub struct AppState {
     pub browser: Arc<BrowserWorker>,
     pub memory: MemoryStore,
     pub audit: AuditLog,
+    pub voice: crate::voice::VoiceState,
+    /// Opt-in clipboard history (memory only).
+    pub clipboard: Arc<crate::clipboard::ClipHistory>,
     /// Microsoft Graph (Outlook mail and calendar).
     pub graph: GraphClient,
     /// Google Workspace (Gmail and Google Calendar).
@@ -44,6 +47,8 @@ impl AppState {
             browser: Arc::new(BrowserWorker::new()),
             memory: MemoryStore::load(config_dir),
             audit: AuditLog::new(config_dir),
+            voice: Default::default(),
+            clipboard: Arc::new(crate::clipboard::ClipHistory::default()),
             graph: GraphClient::load(config_dir),
             google: GoogleClient::load(config_dir),
             keep_in_tray: std::sync::atomic::AtomicBool::new(false),
@@ -69,6 +74,13 @@ impl AppState {
     }
 
     /// Returns true if a matching in-flight request was found.
+    /// Cancels every in-flight request (running tools and pending approvals). Returns how many.
+    pub fn cancel_all(&self) -> usize {
+        let map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        map.values().for_each(|t| t.cancel());
+        map.len()
+    }
+
     pub fn cancel(&self, id: &str) -> bool {
         match self.inflight.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
             Some(t) => {

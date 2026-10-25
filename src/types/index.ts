@@ -150,6 +150,19 @@ export interface Settings {
   keepInTray: boolean;
   /** Desktop notifications for approvals and finished workflows while the app isn't focused. */
   notifications: boolean;
+  /** Opt-in clipboard history (kept in memory by the backend only). */
+  clipboardHistory: boolean;
+  /** Register the global shortcuts below. */
+  globalShortcuts: boolean;
+  shortcuts: { summon: string; voice: string; pause: string; stop: string };
+  /** Push-to-talk microphone button (Windows speech recognition). */
+  voiceInput: boolean;
+  /** Send recognized speech right away instead of putting it in the composer. */
+  autoSendVoice: boolean;
+  /** Read replies aloud with a system voice. */
+  speakReplies: boolean;
+  voiceName: string;
+  speechRate: number;
   // Appearance
   theme: ThemePref;
   fontSize: FontSize;
@@ -186,7 +199,7 @@ export interface AiStatus {
   keyHint: string | null;
 }
 
-export type View ="home" | "chat" | "tasks" | "workflows" | "automations" | "history" | "settings";
+export type View ="home" | "notifications" | "chat" | "tasks" | "workflows" | "automations" | "history" | "settings";
 
 // ---- Workflows (persisted by the Rust backend) -----------------------------
 export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed" | "cancelled";
@@ -199,6 +212,8 @@ export interface WorkflowStep {
   attempts: number;
   /** The assistant's final reply for this step (without the result marker). */
   result?: string;
+  /** Verified output the step produced for later steps (from a "STEP OUTPUT:" block of a successful step). */
+  output?: string;
   error?: string;
   startedAt?: ISODate;
   finishedAt?: ISODate;
@@ -208,6 +223,9 @@ export type WorkflowScheduleKind = "once" | "daily" | "weekly" | "interval";
 
 export interface Schedule {
   id: ID;
+  /** "workflow" (default) runs a fresh copy of the workflow; "reminder" only posts `message`. */
+  action?: "workflow" | "reminder";
+  message?: string;
   /** The workflow used as a template; every run is a fresh copy of its steps. */
   workflowId: ID;
   kind: WorkflowScheduleKind;
@@ -246,6 +264,29 @@ export interface Workflow {
   pauseRequested?: boolean;
   /** Set on runs started by a schedule (a fresh copy of the scheduled workflow). */
   scheduleId?: ID;
+  /** Reusable template: shown under Templates; runs are fresh copies. */
+  template?: boolean;
   createdAt: ISODate;
   updatedAt: ISODate;
+}
+
+export type TriggerKind = "app_started" | "battery_below" | "disk_below";
+
+/** Proactive trigger, evaluated while the app runs (opt-in, one by one). */
+export interface Trigger {
+  id: ID;
+  name: string;
+  enabled: boolean;
+  kind: TriggerKind;
+  /** Program file name (e.g. excel.exe), battery percent, or free GB. */
+  value: string;
+  action: "reminder" | "workflow";
+  message?: string;
+  workflowId?: ID;
+  /** Minimum minutes between firings. */
+  cooldownMinutes: number;
+  lastFiredAt?: ISODate;
+  /** Whether the condition held at the last check (fires on the change to true). */
+  active?: boolean;
+  lastNote?: string;
 }

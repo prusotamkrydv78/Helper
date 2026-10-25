@@ -1,13 +1,13 @@
 import { useState, type ReactNode } from "react";
 import { Ban, CheckCircle2, CircleDashed, Pause, Play, RotateCcw, SkipForward, Sparkles, Trash2, XCircle, AlertTriangle, Loader2 } from "lucide-react";
-import type { Workflow, WorkflowStatus, WorkflowStepStatus } from "../types";
+import type { Workflow, WorkflowStatus, WorkflowStep, WorkflowStepStatus } from "../types";
 import { Page, PageHeader } from "../components/layout/Page";
 import { Button } from "../components/ui/Button";
 import { Badge, EmptyState, Field, Input, Textarea } from "../components/ui/primitives";
 import { ConfirmDialog, useToast } from "../components/ui/overlays";
 import { useStore } from "../store/AppStore";
 import { useWorkflows } from "../store/WorkflowStore";
-import { SchedulesSection } from "./SchedulesSection";
+import { SchedulesSection, TriggersSection } from "./SchedulesSection";
 import { cn, formatRelative } from "../lib/utils";
 
 const STATUS_TONE: Record<WorkflowStatus, "neutral" | "info" | "warning" | "success" | "danger"> = {
@@ -42,6 +42,7 @@ export function WorkflowsPage() {
       )}
       <CreateWorkflow />
       <SchedulesSection />
+      <TriggersSection />
       <div className="mt-8 space-y-4">
         {loaded && workflows.length === 0 && (
           <EmptyState icon={<Sparkles className="size-5" />} title="No workflows yet" description="Describe a goal above to create one." />
@@ -114,6 +115,7 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
   const toast = useToast();
   const executing = activeId === wf.id;
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmRetry, setConfirmRetry] = useState<WorkflowStep | null>(null);
   const waiting = Object.values(state.tasks)
     .filter((t) => t.conversationId === wf.conversationId)
     .flatMap((t) => t.steps.filter((s) => s.status === "awaiting_approval").map((s) => ({ taskId: t.id, step: s })));
@@ -130,7 +132,10 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
     <article className="rounded-xl border border-border bg-surface p-4">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="truncate font-medium">{wf.title}</h2>
+          <h2 className="truncate font-medium">
+            {wf.title}
+            {wf.template && <span className="ml-2 rounded bg-accent/15 px-1.5 text-xs text-accent">template</span>}
+          </h2>
           {wf.goal && <p className="mt-0.5 text-sm text-fg-muted">{wf.goal}</p>}
           <p className="mt-1 text-xs text-fg-subtle">Updated {formatRelative(wf.updatedAt)}</p>
         </div>
@@ -164,10 +169,16 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
                   </p>
                   {s.error && <p className="mt-1 text-xs text-danger">{s.error}</p>}
                   {s.result && <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs text-fg-muted">{s.result}</p>}
+                  {s.output && (
+                    <p className="mt-1 line-clamp-3 whitespace-pre-wrap rounded bg-surface-2 px-2 py-1 text-xs">
+                      <span className="font-medium">Output passed to later steps: </span>
+                      {s.output}
+                    </p>
+                  )}
                 </div>
                 {retryable && (
                   <div className="flex shrink-0 gap-1">
-                    <Button size="sm" variant="outline" icon={<RotateCcw className="size-3.5" />} onClick={guard(() => actions.retryStep(wf.id, s.id))}>
+                    <Button size="sm" variant="outline" icon={<RotateCcw className="size-3.5" />} onClick={s.status === "interrupted" ? () => setConfirmRetry(s) : guard(() => actions.retryStep(wf.id, s.id))}>
                       Retry
                     </Button>
                     <Button size="sm" variant="ghost" icon={<SkipForward className="size-3.5" />} onClick={guard(() => actions.skipStep(wf.id, s.id))}>
@@ -212,6 +223,16 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
             Cancel
           </Button>
         )}
+        {!wf.scheduleId && (
+          <Button size="sm" variant="ghost" onClick={() => actions.setTemplate(wf.id, !wf.template)}>
+            {wf.template ? "Remove from templates" : "Save as template"}
+          </Button>
+        )}
+        {wf.template && (
+          <Button size="sm" variant="outline" icon={<Play className="size-3.5" />} onClick={guard(() => actions.runCopy(wf.id, "manual run", "manual"))}>
+            Run a copy
+          </Button>
+        )}
         <Button size="sm" variant="ghost" onClick={() => app.selectConversation(wf.conversationId)}>
           Open conversation (approvals, details)
         </Button>
@@ -221,6 +242,14 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
           </Button>
         )}
       </footer>
+      <ConfirmDialog
+        open={confirmRetry !== null}
+        onClose={() => setConfirmRetry(null)}
+        onConfirm={guard(() => confirmRetry && actions.retryStep(wf.id, confirmRetry.id))}
+        title="Retry an interrupted step?"
+        description={`“${confirmRetry?.instruction ?? ""}” was running when the app closed, so it may already have done part of its work (sent, moved or changed something). Check the conversation and your files first. Retrying runs the whole step again.`}
+        confirmLabel="Retry step"
+      />
       <ConfirmDialog
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}

@@ -320,6 +320,57 @@ elevated windows (UIPI) and to the secure desktop; some apps (games, DRM video) 
 input or can't be captured. Coordinates assume the app is DPI-aware (Tauri is), so window rectangles and
 input positions use the same physical pixels.
 
+## Clipboard history, app actions, file rules, shortcuts and voice
+
+- **Clipboard history** (Settings → Clipboard, off by default): text and images, memory only, cleared when
+  turned off or on exit; up to 50 items / 5 images, pinning, search, copy back. Content marked private by its
+  app (`ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory` = 0) is never captured;
+  text that looks like a password, key, token or card number is skipped. Tools `clipboard_history` (always asks)
+  and `clipboard_restore` need the Clipboard permission.
+- **App actions:** `open_file` (document from an allowed folder with its default app; programs and scripts are
+  refused), `app_menu` (menu path like File › Save As, including popup menus; always asks), `app_fill_form`
+  (fields by label, all matched before anything changes, values read back, password fields refused, nothing
+  submitted; always asks).
+- **File rules** (Settings → File rules): saved organize rules (by type, year, month or a folder pattern such as
+  `Photos/{year}/{month}`), preview + confirm before applying. Moves, renames and organizing are recorded in an
+  undo history (last 20, `file_undo.json`); undo moves files back after a preview and refuses to overwrite.
+  Tools: `organize_files` (with `target` / `extensions`), `list_file_changes`, `undo_file_changes`.
+- **Global shortcuts** (Settings → Shortcuts, off by default): show JARVIS, start voice input, pause the running
+  workflow, stop all automation (cancels every running request and pending approval).
+- **Voice** (Settings → Voice): push-to-talk via Windows speech recognition (`Windows.Media.SpeechRecognition`;
+  needs a microphone and *Online speech recognition* enabled in Windows privacy settings); audio isn't stored.
+  Replies can be read aloud with the installed Windows voices (Web Speech synthesis); speaking stops when you
+  talk, send or press Stop.
+- **Task chaining:** Command Center → *Plan* turns a goal into a draft workflow (editable steps, progress,
+  retry/skip, approvals) on the Workflows page.
+
+## Proactive features, workspaces, documents and recovery
+
+- **Notification center** (sidebar → Notifications, unread badge): approvals, completed/failed workflows,
+  reminders, triggers and interrupted workflows, with Review and Dismiss. Stored on this device (titles/short
+  text only, last 200); also raised as Windows notifications while the app isn't focused.
+- **Reminders:** a schedule's action can be *Show a reminder* instead of running a workflow.
+- **Triggers** (Workflows → Triggers, opt-in): when an app starts (`excel.exe`), battery drops below N % on
+  battery power, or free disk space drops below N GB. Checked every 30 s while the app runs; fires when the
+  condition becomes true, respects a cooldown, and the notification says why. Actions: reminder, or a fresh
+  workflow run (approvals as usual). Stored in `triggers.json`.
+- **Cross-app results:** a successful step may end with a `STEP OUTPUT:` block; it's stored with the step and
+  passed in full (≤ 4,000 characters) to later steps, which are told not to repeat completed steps.
+- **Templates:** mark a workflow *Save as template*; *Run a copy* starts a fresh run.
+- **Recovery:** steps are checkpointed before they start; after a restart, interrupted steps are flagged in the
+  notification center and retrying one asks for confirmation (it may repeat side effects).
+- **Workspaces** (Settings → Workspaces): save open windows' positions/sizes/states under a name; restoring
+  shows a preview, arranges matching open windows (verified), reports missing apps and only launches them if
+  they're on the allowed-apps list. Tool `workspace_layouts` (apply asks first). Virtual desktops aren't
+  restored (Windows only lets apps move their own windows between desktops).
+- **Ask your documents** (Settings → Documents) and tool `document_search`: local TF-IDF ranking of paragraphs
+  in text documents (txt, md, csv, json, html, xml, yaml, ini, log…) of an allowed folder, with file names, line
+  numbers and excerpts. The Settings page searches locally and only sends the shown passages to the AI after
+  you confirm. (The tool's excerpts go to the model like any tool result, under the Read files permission.)
+  PDF and Office files aren't parsed.
+- **Preferences:** memory notes now include reusable instructions and preferred apps, and can be edited or
+  disabled (disabled notes aren't sent to the model).
+
 ## Desktop app tools (Windows)
 
 The assistant can read and operate other apps' windows through Windows UI Automation

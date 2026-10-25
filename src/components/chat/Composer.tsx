@@ -1,5 +1,7 @@
-import { forwardRef, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
-import { ArrowUp, Paperclip, Square, X } from "lucide-react";
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
+import { ArrowUp, Mic, MicOff, Paperclip, Square, X } from "lucide-react";
+import { featureService } from "../../services/tauri/assistant";
+import { stopSpeaking } from "../../lib/speech";
 import type { Attachment } from "../../types";
 import { cn, formatBytes, uid } from "../../lib/utils";
 import { useStore } from "../../store/AppStore";
@@ -24,6 +26,37 @@ export const Composer = forwardRef<ComposerHandle, { streaming: boolean; onStop:
     const ta = useRef<HTMLTextAreaElement>(null);
     const fileInput = useRef<HTMLInputElement>(null);
     const sendOnEnter = state.settings.sendOnEnter;
+    const [listening, setListening] = useState(false);
+
+    /** Push-to-talk: one utterance via Windows speech recognition (nothing is recorded to disk). */
+    const listen = () => {
+      if (listening) {
+        void featureService.voiceCancel();
+        return;
+      }
+      stopSpeaking(); // interrupt a reply being read aloud
+      setListening(true);
+      void featureService
+        .voiceListen()
+        .then((heard) => {
+          const t = heard.trim();
+          if (!t) return;
+          if (state.settings.autoSendVoice && !streaming) actions.sendMessage(t);
+          else setText((cur) => (cur.trim() ? `${cur} ${t}` : t));
+        })
+        .catch((e) => {
+          if (e?.kind !== "cancelled") toast(e?.message ?? "Voice input failed", "error");
+        })
+        .finally(() => setListening(false));
+    };
+    const listenRef = useRef(listen);
+    listenRef.current = listen;
+    // The global "voice" shortcut starts push-to-talk here.
+    useEffect(() => {
+      const start = () => state.settings.voiceInput && listenRef.current();
+      window.addEventListener("jarvis:voice", start);
+      return () => window.removeEventListener("jarvis:voice", start);
+    }, [state.settings.voiceInput]);
 
     useImperativeHandle(ref, () => ({
       focus: () => ta.current?.focus(),
@@ -140,6 +173,19 @@ export const Composer = forwardRef<ComposerHandle, { streaming: boolean; onStop:
                   onClick={() => fileInput.current?.click()}
                 />
               </Tooltip>
+              {state.settings.voiceInput && (
+                <Tooltip label={listening ? "Listening… click to cancel" : "Speak (push to talk)"}>
+                  <Button
+                    size="icon"
+                    variant={listening ? "primary" : "ghost"}
+                    aria-label={listening ? "Cancel voice input" : "Voice input"}
+                    aria-pressed={listening}
+                    className={listening ? "animate-pulse" : undefined}
+                    icon={listening ? <MicOff className="size-4" /> : <Mic className="size-4" />}
+                    onClick={listen}
+                  />
+                </Tooltip>
+              )}
             </div>
             <div className="flex items-center gap-2.5">
               <span className="hidden items-center gap-1 text-[11px] text-fg-subtle sm:flex">

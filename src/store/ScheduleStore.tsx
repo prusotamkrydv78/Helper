@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ID, Schedule } from "../types";
+import type { ID, Schedule, Trigger } from "../types";
 import { nowISO, uid } from "../lib/utils";
-import { scheduleService } from "../services/tauri/workflows";
+import { scheduleService, triggerService, type TriggerState } from "../services/tauri/workflows";
+import { useNotifications } from "./NotificationStore";
 import { useWorkflows } from "./WorkflowStore";
 
 /**
@@ -61,6 +62,7 @@ export function nextOccurrence(s: Pick<Schedule, "kind" | "time" | "date" | "wee
 }
 
 export function validateSchedule(s: ScheduleInput): string | null {
+  if (s.action === "reminder" && !s.message?.trim()) return "Write the reminder text.";
   if (s.kind !== "interval" && !/^\d{2}:\d{2}$/.test(s.time)) return "Choose a time.";
   if (s.kind === "once" && !s.date) return "Choose a date.";
   if (s.kind === "weekly" && !s.weekdays?.length) return "Choose at least one weekday.";
@@ -77,6 +79,8 @@ interface ScheduleValue {
   update(id: ID, input: ScheduleInput): void;
   setEnabled(id: ID, enabled: boolean): void;
   remove(id: ID): void;
+  triggers: Trigger[];
+  saveTriggers(list: Trigger[]): Promise<void>;
   clearAll(): Promise<void>;
 }
 
@@ -87,6 +91,16 @@ const errorText = (e: unknown) =>
 
 export function ScheduleProvider({ children }: { children: ReactNode }) {
   const { actions: wf, loaded: workflowsLoaded } = useWorkflows();
+  const { push } = useNotifications();
+  const pushRef = useRef(push);
+  pushRef.current = push;
+  const [triggers, setTriggers] = useState<Trigger[]>([]);
+  const triggersRef = useRef<Trigger[]>([]);
+  const saveTriggers = useCallback(async (list: Trigger[]) => {
+    triggersRef.current = list;
+    setTriggers(list);
+    await triggerService.save(list);
+  }, []);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +133,13 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
+    void triggerService
+      .load()
+      .then((t) => {
+        triggersRef.current = t;
+        setTriggers(t);
+      })
+      .catch(() => {});
     scheduleService
       .load()
       .then((list) => {
@@ -150,7 +171,7 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
           await patch(s.id, { ...advance(s, now), lastNote: `Missed the run due ${due.toLocaleString()} (the app was closed or asleep).` });
           continue;
         }
-        if (wfRef.current.isBusy()) {
+        if (s.action !== "reminder" && wfRef.current.isBusy()) {
           if (late > MAX_WAIT_MS)
             await patch(s.id, { ...advance(s, now), lastNote: `Skipped the run due ${due.toLocaleString()}: another workflow was running.` });
           continue; // wait for the next tick
@@ -161,6 +182,10 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
         } catch {
           continue; // not saved: don't run (could repeat after a restart)
         }
+        if (s.action === "reminder") {
+          pushRef.current({ kind: "reminder", title: "Reminder", body: `${s.message ?? ""}\n(Scheduled ${due.toLocaleString()})`, target: { view: "workflows" } });
+          continue;
+        }
         try {
           const label = late > GRACE_MS ? `catch-up for ${due.toLocaleString()}` : now.toLocaleString();
           const runId = wfRef.current.runCopy(s.workflowId, label, s.id);
@@ -169,12 +194,50 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
           await patch(s.id, { lastNote: `Couldn't start: ${errorText(e)}` }).catch(() => {});
         }
       }
+      await checkTriggers();
     } catch (e) {
       setError(errorText(e));
     } finally {
       ticking.current = false;
     }
-  }, [patch]);
+  }, [patch]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Evaluates enabled triggers against the current system state; fires on the change to true, after the cooldown. */
+  const checkTriggers = async () => {
+    const enabled = triggersRef.current.filter((t) => t.enabled);
+    if (!enabled.length) return;
+    const st: TriggerState | null = await triggerService.state().catch(() => null);
+    if (!st) return;
+    let changed = false;
+    const next: Trigger[] = [];
+    for (const t of triggersRef.current) {
+      if (!t.enabled) {
+        next.push(t);
+        continue;
+      }
+      const reason = evaluate(t, st);
+      const active = reason !== null;
+      let updated: Trigger = { ...t, active };
+      const cooled = !t.lastFiredAt || Date.now() - Date.parse(t.lastFiredAt) > Math.max(1, t.cooldownMinutes) * 60_000;
+      if (active && !t.active && cooled) {
+        updated = { ...updated, lastFiredAt: new Date().toISOString(), lastNote: reason };
+        if (t.action === "workflow" && t.workflowId) {
+          try {
+            wfRef.current.runCopy(t.workflowId, `trigger: ${t.name}`, `trigger:${t.id}`);
+            pushRef.current({ kind: "trigger", title: `Trigger “${t.name}” started a workflow`, body: `Why: ${reason}`, target: { view: "workflows" } });
+          } catch (e) {
+            updated.lastNote = `${reason} — couldn't start the workflow: ${errorText(e)}`;
+            pushRef.current({ kind: "failed", title: `Trigger “${t.name}” couldn't run its workflow`, body: updated.lastNote, target: { view: "workflows" } });
+          }
+        } else {
+          pushRef.current({ kind: "trigger", title: t.message?.trim() || `Trigger: ${t.name}`, body: `Why: ${reason}` });
+        }
+      }
+      if (updated.active !== t.active || updated.lastFiredAt !== t.lastFiredAt) changed = true;
+      next.push(updated);
+    }
+    if (changed) await saveTriggers(next).catch(() => {});
+  };
 
   useEffect(() => {
     // Workflows must be loaded first so runs can find their template.
@@ -225,9 +288,11 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
         void patch(id, { enabled, nextRunAt: next ? next.toISOString() : s.nextRunAt }).catch(() => {});
       },
       remove: (id) => void commit((list) => list.filter((s) => s.id !== id)).catch(() => {}),
+      triggers,
+      saveTriggers,
       clearAll: () => commit(() => []),
     }),
-    [schedules, loaded, error, commit, patch],
+    [schedules, loaded, error, commit, patch, triggers, saveTriggers],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -237,4 +302,25 @@ export function useSchedules(): ScheduleValue {
   const v = useContext(Ctx);
   if (!v) throw new Error("useSchedules must be used inside ScheduleProvider");
   return v;
+}
+
+/** The reason a trigger's condition holds right now, or null. */
+function evaluate(t: Trigger, st: TriggerState): string | null {
+  const v = t.value.trim();
+  switch (t.kind) {
+    case "app_started": {
+      const exe = v.toLowerCase().endsWith(".exe") ? v.toLowerCase() : `${v.toLowerCase()}.exe`;
+      return st.processes.includes(exe) ? `${exe} is running` : null;
+    }
+    case "battery_below": {
+      const b = st.battery;
+      const limit = Number(v);
+      return b?.present && b.percent != null && !b.on_ac_power && b.percent < limit ? `battery at ${b.percent}% (below ${limit}%) on battery power` : null;
+    }
+    case "disk_below": {
+      const limit = Number(v);
+      const low = st.drives.find((d) => d.free_gb < limit);
+      return low ? `${low.drive} has ${low.free_gb} GB free (below ${limit} GB)` : null;
+    }
+  }
 }

@@ -7,8 +7,14 @@ import type { ComposerHandle } from "./components/chat/Composer";
 import { TasksPage } from "./pages/TasksPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { CommandCenterPage } from "./pages/CommandCenterPage";
-import { assistantService } from "./services/tauri/assistant";
+import { assistantService, featureService } from "./services/tauri/assistant";
+import { isTauri } from "./services/tauri/tauriAi";
+import { listen } from "@tauri-apps/api/event";
+import { useWorkflows } from "./store/WorkflowStore";
+import { useToast } from "./components/ui/overlays";
 import { WorkflowProvider } from "./store/WorkflowStore";
+import { NotificationProvider } from "./store/NotificationStore";
+import { NotificationsPage } from "./pages/NotificationsPage";
 import { ScheduleProvider } from "./store/ScheduleStore";
 import { AutomationsPage } from "./pages/AutomationsPage";
 import { HistoryPage } from "./pages/HistoryPage";
@@ -37,6 +43,39 @@ function Shell() {
   const composerRef = useRef<ComposerHandle>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   useAppearance();
+  const { activeId, actions: wf } = useWorkflows();
+  const toast = useToast();
+  // Global shortcuts and clipboard history are applied in the backend.
+  useEffect(() => {
+    const s = state.settings;
+    void featureService
+      .setShortcuts(s.globalShortcuts ? s.shortcuts : {})
+      .then((failed) => failed.length && toast(`Some shortcuts couldn't be registered: ${failed.join("; ")}`, "error"))
+      .catch(() => {});
+  }, [state.settings.globalShortcuts, state.settings.shortcuts]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => void featureService.clipSetEnabled(state.settings.clipboardHistory).catch(() => {}), [state.settings.clipboardHistory]);
+  const shortcutRef = useRef<(a: string) => void>(() => {});
+  shortcutRef.current = (action: string) => {
+    if (action === "summon") {
+      actions.setView("chat");
+      requestAnimationFrame(() => composerRef.current?.focus());
+    } else if (action === "voice") {
+      actions.setView("chat");
+      requestAnimationFrame(() => window.dispatchEvent(new Event("jarvis:voice")));
+    } else if (action === "pause") {
+      if (activeId) wf.pause(activeId);
+      toast(activeId ? "The workflow pauses after its current step" : "No workflow is running", "info");
+    } else if (action === "stop") {
+      actions.stopAll();
+      toast("Stopped running tasks", "info");
+    }
+  };
+  useEffect(() => {
+    if (!isTauri()) return;
+    let off: (() => void) | undefined;
+    void listen<string>("shortcut", (e) => shortcutRef.current(e.payload)).then((u) => (off = u));
+    return () => off?.();
+  }, []);
   // The backend decides on window close whether to hide to the tray.
   useEffect(() => assistantService.setKeepInTray(state.settings.keepInTray), [state.settings.keepInTray]);
 
@@ -84,6 +123,7 @@ function Shell() {
       <Sidebar searchRef={searchRef} />
       <main className="relative min-w-0 flex-1">
         {state.ui.view === "home" && <CommandCenterPage />}
+        {state.ui.view === "notifications" && <NotificationsPage />}
         {state.ui.view === "chat" && <ChatView composerRef={composerRef} />}
         {state.ui.view === "tasks" && <TasksPage />}
         {state.ui.view === "workflows" && <WorkflowsPage />}
@@ -98,13 +138,15 @@ function Shell() {
 export default function App() {
   return (
     <AppStoreProvider>
-      <WorkflowProvider>
-        <ScheduleProvider>
-          <ToastProvider>
-            <Shell />
-          </ToastProvider>
-        </ScheduleProvider>
-      </WorkflowProvider>
+      <NotificationProvider>
+        <WorkflowProvider>
+          <ScheduleProvider>
+            <ToastProvider>
+              <Shell />
+            </ToastProvider>
+          </ScheduleProvider>
+        </WorkflowProvider>
+      </NotificationProvider>
     </AppStoreProvider>
   );
 }

@@ -7,7 +7,11 @@ use std::sync::atomic::Ordering;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, AppHandle, Manager, State, Window, WindowEvent};
+use std::sync::Mutex;
+
+use tauri::Emitter;
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::error::AppError;
@@ -61,6 +65,56 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
             let _ = window.hide();
         }
     }
+}
+
+/// Registered global shortcuts and their actions (summon | voice | pause | stop).
+static SHORTCUTS: Mutex<Vec<(Shortcut, String)>> = Mutex::new(Vec::new());
+
+/// The global-shortcut plugin: "summon" shows the window and "stop" cancels all
+/// running requests here; every action is also sent to the UI as a "shortcut" event.
+pub fn shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri_plugin_global_shortcut::Builder::new()
+        .with_handler(|app, shortcut, event| {
+            if event.state() != ShortcutState::Pressed {
+                return;
+            }
+            let action = SHORTCUTS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(s, _)| s == shortcut).map(|(_, a)| a.clone());
+            let Some(action) = action else { return };
+            match action.as_str() {
+                "summon" | "voice" => show_main(app),
+                "stop" => {
+                    let n = app.state::<AppState>().cancel_all();
+                    log::info!("stop shortcut: cancelled {n} running request(s)");
+                }
+                _ => {}
+            }
+            let _ = app.emit("shortcut", action);
+        })
+        .build()
+}
+
+/// Replaces all global shortcuts. `map`: action → accelerator (e.g. "CommandOrControl+Alt+J");
+/// empty values are skipped. Returns the shortcuts that couldn't be registered.
+#[tauri::command]
+pub fn shortcuts_set(app: AppHandle, map: std::collections::HashMap<String, String>) -> Result<Vec<String>, AppError> {
+    let gs = app.global_shortcut();
+    gs.unregister_all().map_err(|e| AppError::internal(e.to_string()))?;
+    let mut registered = Vec::new();
+    let mut failed = Vec::new();
+    for (action, accel) in map {
+        if !matches!(action.as_str(), "summon" | "voice" | "pause" | "stop") || accel.trim().is_empty() {
+            continue;
+        }
+        match accel.trim().parse::<Shortcut>() {
+            Ok(s) => match gs.register(s.clone()) {
+                Ok(()) => registered.push((s, action)),
+                Err(e) => failed.push(format!("{accel} ({action}): {e}")),
+            },
+            Err(e) => failed.push(format!("{accel} ({action}): {e}")),
+        }
+    }
+    *SHORTCUTS.lock().unwrap_or_else(|e| e.into_inner()) = registered;
+    Ok(failed)
 }
 
 #[tauri::command]

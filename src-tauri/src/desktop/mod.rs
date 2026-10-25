@@ -124,12 +124,32 @@ pub fn approval_reason(spec: &ToolSpec, args: &Value, level: PermissionLevel, al
             let a: LaunchArgs = crate::tools::parse(args)?;
             Ok(Some(format!("Launch {}", resolve_app(&a.app, allowed)?.display())))
         }
+        "workspace_layouts" if args.get("action").and_then(Value::as_str) == Some("apply") => {
+            let name = args.get("name").and_then(Value::as_str).unwrap_or_default();
+            let windows = layout_named(name)?;
+            let preview = preview_layout(&windows)?;
+            let missing = preview.iter().filter(|p| p["match"].is_null()).count();
+            let mut s = format!("Arrange windows for layout “{name}” ({} windows", windows.len());
+            if missing > 0 {
+                s.push_str(&format!(", {missing} not open"));
+                if args.get("launch_missing").and_then(Value::as_bool) == Some(true) {
+                    s.push_str("; allowed apps among them will be launched");
+                }
+            }
+            s.push(')');
+            Ok(Some(s))
+        }
+        "open_file" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+            Ok((level == PermissionLevel::Ask).then(|| format!("Open {path} with its default app")))
+        }
         _ => imp::approval_reason(spec.name, args, level),
     }
 }
 
 pub fn execute(spec: &ToolSpec, args: &Value, allowed: &[String]) -> Result<ToolOutput, ToolError> {
     match spec.name {
+        "workspace_layouts" => layout_tool(args, allowed),
         "app_launch" => {
             let a: LaunchArgs = crate::tools::parse(args)?;
             let path = resolve_app(&a.app, allowed)?;
@@ -159,6 +179,123 @@ pub fn execute(spec: &ToolSpec, args: &Value, allowed: &[String]) -> Result<Tool
 
 #[cfg(windows)]
 pub(crate) use imp::process_info;
+
+/// One window of a saved workspace layout.
+#[derive(serde::Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutWindow {
+    pub exe: String,
+    pub title: String,
+    /// left, top, right, bottom of the restored (normal) position, in screen pixels.
+    pub rect: [i32; 4],
+    /// normal | maximized | minimized
+    pub state: String,
+}
+
+static LAYOUT_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Layouts are stored in `layouts.json` (also edited from the UI via workflows.rs).
+pub fn set_layout_dir(dir: &std::path::Path) {
+    let _ = LAYOUT_FILE.set(dir.join("layouts.json"));
+}
+
+fn saved_layouts() -> Vec<Value> {
+    LAYOUT_FILE.get().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn layout_named(name: &str) -> Result<Vec<LayoutWindow>, ToolError> {
+    let l = saved_layouts()
+        .into_iter()
+        .find(|l| l["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name.trim())))
+        .ok_or_else(|| ToolError::not_found(format!("No saved layout named “{name}”. Use workspace_layouts with action list.")))?;
+    serde_json::from_value(l["windows"].clone()).map_err(|_| ToolError::invalid("That layout is damaged; save it again."))
+}
+
+pub fn capture_layout() -> Result<Vec<LayoutWindow>, ToolError> {
+    imp::capture_layout()
+}
+
+/// What restoring would do: per saved window, the matching open window (or none).
+pub fn preview_layout(windows: &[LayoutWindow]) -> Result<Vec<Value>, ToolError> {
+    imp::preview_layout(windows)
+}
+
+/// Restores positions of matching open windows; missing apps are launched only if they're on the allow-list.
+pub fn restore_layout(windows: &[LayoutWindow], launch_missing: bool, allowed: &[String]) -> Result<Value, ToolError> {
+    let mut launched = Vec::new();
+    if launch_missing {
+        for p in preview_layout(windows)? {
+            if p["match"].is_null() {
+                let exe = p["exe"].as_str().unwrap_or_default();
+                if let Ok(path) = resolve_app(exe, allowed) {
+                    if std::process::Command::new(&path).spawn().is_ok() {
+                        launched.push(path.display().to_string());
+                    }
+                }
+            }
+        }
+        if !launched.is_empty() {
+            // Give launched apps a moment to show their windows.
+            std::thread::sleep(std::time::Duration::from_secs(4));
+        }
+    }
+    let mut v = imp::restore_layout(windows)?;
+    v["launched"] = serde_json::json!(launched);
+    Ok(v)
+}
+
+pub fn layout_tool(args: &Value, allowed: &[String]) -> Result<ToolOutput, ToolError> {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("list");
+    match action {
+        "list" => {
+            let names: Vec<Value> = saved_layouts()
+                .iter()
+                .map(|l| serde_json::json!({ "name": l["name"], "windows": l["windows"].as_array().map_or(0, Vec::len) }))
+                .collect();
+            Ok(ToolOutput { summary: format!("{} saved layouts", names.len()), content: serde_json::json!({ "layouts": names }), file: None })
+        }
+        "apply" => {
+            let name = args.get("name").and_then(Value::as_str).unwrap_or_default();
+            let windows = layout_named(name)?;
+            let launch = args.get("launch_missing").and_then(Value::as_bool).unwrap_or(false);
+            let v = restore_layout(&windows, launch, allowed)?;
+            let summary = format!("Arranged {} window(s) for “{name}”", v["arranged"].as_u64().unwrap_or(0));
+            Ok(ToolOutput { content: v, summary, file: None })
+        }
+        other => Err(ToolError::invalid(format!("`action` must be list or apply, not `{other}`."))),
+    }
+}
+
+/// File types that run code; `open_file` refuses them.
+const EXECUTABLE_EXTS: &[&str] = &[
+    "exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "msp", "scr", "lnk", "url", "hta",
+    "cpl", "reg", "jar", "appref-ms", "application", "pif", "inf", "dll", "sys",
+];
+
+/// Opens a document (inside the permitted folders) with its default app.
+pub fn open_document(guard: &crate::tools::paths::PathGuard, args: &Value) -> Result<ToolOutput, ToolError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OpenArgs {
+        path: String,
+    }
+    let a: OpenArgs = crate::tools::parse(args)?;
+    let path = guard.existing(&a.path)?;
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if EXECUTABLE_EXTS.contains(&ext.as_str()) {
+        return Err(ToolError::denied("That file type runs code; the assistant only opens documents. Use app_launch for allowed apps."));
+    }
+    if !path.is_file() {
+        return Err(ToolError::invalid("Only files can be opened (use list_files for folders)."));
+    }
+    imp::open_shortcut(&path)?;
+    let shown = crate::tools::paths::display(&path);
+    Ok(ToolOutput {
+        content: serde_json::json!({ "opened": shown, "note": "Opened with the default app. Use app_list_windows to find its window before acting on it." }),
+        summary: format!("Opened {shown}"),
+        file: None,
+    })
+}
 
 const MAX_SHOT_WIDTH: u32 = 1600;
 
@@ -216,7 +353,7 @@ pub async fn analyze_screenshot(
     })
 }
 
-fn base64(bytes: &[u8]) -> String {
+pub(crate) fn base64(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for c in bytes.chunks(3) {
@@ -246,6 +383,15 @@ mod imp {
         Err(unsupported())
     }
     pub fn capture_png(_: i64, _: u32) -> Result<(Vec<u8>, String), ToolError> {
+        Err(unsupported())
+    }
+    pub fn capture_layout() -> Result<Vec<super::LayoutWindow>, ToolError> {
+        Err(unsupported())
+    }
+    pub fn preview_layout(_: &[super::LayoutWindow]) -> Result<Vec<Value>, ToolError> {
+        Err(unsupported())
+    }
+    pub fn restore_layout(_: &[super::LayoutWindow]) -> Result<Value, ToolError> {
         Err(unsupported())
     }
 }
@@ -285,7 +431,8 @@ mod imp {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetAncestor, GetForegroundWindow, GetWindowRect, IsZoomed, MoveWindow, PostMessageW, SetCursorPos, WindowFromPoint,
-        GA_ROOT, SW_MAXIMIZE, SW_MINIMIZE, WM_CLOSE,
+        GA_ROOT, SW_MAXIMIZE, SW_MINIMIZE, WM_CLOSE, GetWindowPlacement, SetWindowPlacement, WINDOWPLACEMENT, SW_SHOWMAXIMIZED,
+        SW_SHOWMINIMIZED,
     };
     use windows::Win32::Foundation::POINT;
 
@@ -450,6 +597,97 @@ mod imp {
     unsafe extern "system" fn collect(h: HWND, l: LPARAM) -> BOOL {
         unsafe { (*(l.0 as *mut Vec<HWND>)).push(h) };
         BOOL(1)
+    }
+
+    fn placement(h: HWND) -> Option<WINDOWPLACEMENT> {
+        let mut wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+        unsafe { GetWindowPlacement(h, &mut wp) }.ok()?;
+        Some(wp)
+    }
+
+    pub fn capture_layout() -> Result<Vec<super::LayoutWindow>, ToolError> {
+        Ok(list_windows()
+            .into_iter()
+            .filter_map(|w| {
+                let wp = placement(w.hwnd)?;
+                let r = wp.rcNormalPosition;
+                let state = if unsafe { IsIconic(w.hwnd) }.as_bool() {
+                    "minimized"
+                } else if unsafe { IsZoomed(w.hwnd) }.as_bool() {
+                    "maximized"
+                } else {
+                    "normal"
+                };
+                Some(super::LayoutWindow { exe: w.exe, title: w.title, rect: [r.left, r.top, r.right, r.bottom], state: state.into() })
+            })
+            .collect())
+    }
+
+    /// Pairs each saved window with an open window of the same program (same title preferred), each used once.
+    fn match_windows(saved: &[super::LayoutWindow]) -> Vec<Option<Win>> {
+        let mut open: Vec<Option<Win>> = list_windows().into_iter().map(Some).collect();
+        saved
+            .iter()
+            .map(|s| {
+                let same_exe = |w: &Win| w.exe.eq_ignore_ascii_case(&s.exe);
+                let idx = open
+                    .iter()
+                    .position(|w| w.as_ref().is_some_and(|w| same_exe(w) && w.title == s.title))
+                    .or_else(|| open.iter().position(|w| w.as_ref().is_some_and(same_exe)));
+                idx.and_then(|i| open[i].take())
+            })
+            .collect()
+    }
+
+    pub fn preview_layout(saved: &[super::LayoutWindow]) -> Result<Vec<Value>, ToolError> {
+        Ok(saved
+            .iter()
+            .zip(match_windows(saved))
+            .map(|(s, w)| {
+                json!({
+                    "exe": s.exe, "title": s.title, "state": s.state, "rect": s.rect,
+                    "match": w.map(|w| json!({ "window": w.hwnd.0 as isize as i64, "title": w.title })),
+                })
+            })
+            .collect())
+    }
+
+    pub fn restore_layout(saved: &[super::LayoutWindow]) -> Result<Value, ToolError> {
+        let mut results = Vec::new();
+        let mut arranged = 0;
+        for (s, w) in saved.iter().zip(match_windows(saved)) {
+            let Some(w) = w else {
+                results.push(json!({ "exe": s.exe, "title": s.title, "ok": false, "error": "not open" }));
+                continue;
+            };
+            let Some(mut wp) = placement(w.hwnd) else {
+                results.push(json!({ "exe": s.exe, "title": w.title, "ok": false, "error": "couldn't read the window" }));
+                continue;
+            };
+            wp.rcNormalPosition = RECT { left: s.rect[0], top: s.rect[1], right: s.rect[2], bottom: s.rect[3] };
+            wp.showCmd = match s.state.as_str() {
+                "maximized" => SW_SHOWMAXIMIZED.0 as _,
+                "minimized" => SW_SHOWMINIMIZED.0 as _,
+                _ => SW_SHOWNORMAL.0 as _,
+            };
+            let set = unsafe { SetWindowPlacement(w.hwnd, &wp) };
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Verify the restored rectangle (apps may enforce minimum sizes).
+            let ok = set.is_ok()
+                && placement(w.hwnd).is_some_and(|now| {
+                    let r = now.rcNormalPosition;
+                    (r.left - s.rect[0]).abs() <= 16 && (r.top - s.rect[1]).abs() <= 16
+                });
+            if ok {
+                arranged += 1;
+            }
+            results.push(json!({ "exe": s.exe, "title": w.title, "ok": ok, "error": (!ok).then_some("Windows didn't apply the position") }));
+        }
+        Ok(json!({
+            "arranged": arranged,
+            "results": results,
+            "note": "Virtual desktops aren't restored: Windows only lets an app move its own windows between desktops.",
+        }))
     }
 
     fn list_windows() -> Vec<Win> {
@@ -949,6 +1187,191 @@ mod imp {
         })
     }
 
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MenuArgs {
+        window: i64,
+        /// e.g. ["File", "Save As"]
+        path: Vec<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FormField {
+        label: String,
+        value: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FormArgs {
+        window: i64,
+        fields: Vec<FormField>,
+    }
+
+    /// Menu/label text without accelerators ("&File"), shortcut hints ("Save\tCtrl+S"), "…" or trailing ":"/"*".
+    fn norm(s: &str) -> String {
+        let s = s.split('\t').next().unwrap_or_default();
+        s.replace('&', "").trim().trim_end_matches(['.', '…', ':', '*']).trim().to_lowercase()
+    }
+
+    /// The window plus other visible top-level windows of the same process (menus and dialogs open as popups).
+    fn process_windows(w: &Win) -> Vec<HWND> {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(w.hwnd, Some(&mut pid)) };
+        let mut hs: Vec<HWND> = Vec::new();
+        let _ = unsafe { EnumWindows(Some(collect), LPARAM(&mut hs as *mut Vec<HWND> as isize)) };
+        let mut out = vec![w.hwnd];
+        for h in hs {
+            let mut p = 0u32;
+            unsafe { GetWindowThreadProcessId(h, Some(&mut p)) };
+            if p == pid && h != w.hwnd && unsafe { IsWindowVisible(h) }.as_bool() {
+                out.push(h);
+            }
+        }
+        out
+    }
+
+    fn menu(a: &MenuArgs) -> Result<ToolOutput, ToolError> {
+        if a.path.is_empty() || a.path.len() > 6 {
+            return Err(ToolError::invalid("`path` needs 1–6 menu names, e.g. [\"File\", \"Save As\"]."));
+        }
+        let w = open_window(a.window)?;
+        unsafe {
+            let _ = SetForegroundWindow(w.hwnd);
+        }
+        let _com = Com::init()?;
+        let auto = uia()?;
+        for (i, want) in a.path.iter().enumerate() {
+            let target = norm(want);
+            let mut seen: Vec<String> = Vec::new();
+            let mut found = None;
+            'search: for h in process_windows(&w) {
+                for e in all_elements(&auto, h).unwrap_or_default() {
+                    let t = ctype(&e);
+                    if t != UIA_MenuItemControlTypeId.0 && t != UIA_MenuBarControlTypeId.0 {
+                        continue;
+                    }
+                    let n = name(&e);
+                    if norm(&n) == target {
+                        found = Some(e);
+                        break 'search;
+                    }
+                    if seen.len() < 20 && !n.trim().is_empty() {
+                        seen.push(n.replace('&', ""));
+                    }
+                }
+            }
+            let Some(item) = found else {
+                return Err(ToolError::not_found(format!(
+                    "Menu item “{want}” wasn't found (step {} of {}). Visible menu items: {}",
+                    i + 1,
+                    a.path.len(),
+                    if seen.is_empty() { "none (this app may not expose its menus)".into() } else { seen.join(", ") }
+                )));
+            };
+            if !flag(unsafe { item.CurrentIsEnabled() }) {
+                return Err(ToolError::invalid(format!("Menu item “{want}” is disabled.")));
+            }
+            let last = i + 1 == a.path.len();
+            unsafe {
+                if !last {
+                    if let Ok(p) = pattern::<IUIAutomationExpandCollapsePattern>(&item, UIA_ExpandCollapsePatternId) {
+                        p.Expand().map_err(err)?;
+                    } else if let Ok(p) = pattern::<IUIAutomationInvokePattern>(&item, UIA_InvokePatternId) {
+                        p.Invoke().map_err(err)?;
+                    } else {
+                        return Err(unsupported());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(350));
+                } else if let Ok(p) = pattern::<IUIAutomationInvokePattern>(&item, UIA_InvokePatternId) {
+                    p.Invoke().map_err(err)?;
+                } else if let Ok(p) = pattern::<IUIAutomationTogglePattern>(&item, UIA_TogglePatternId) {
+                    p.Toggle().map_err(err)?;
+                } else {
+                    return Err(unsupported());
+                }
+            }
+        }
+        Ok(ToolOutput {
+            content: json!({
+                "menu": a.path.join(" › "),
+                "invoked": true,
+                "note": "The menu command was invoked. Read the window (or new dialogs via app_list_windows) to confirm what it did.",
+            }),
+            summary: format!("Menu {} in “{}”", a.path.join(" › "), clip(&w.title, 60)),
+            file: None,
+        })
+    }
+
+    fn fill_form(a: &FormArgs) -> Result<ToolOutput, ToolError> {
+        if a.fields.is_empty() || a.fields.len() > 30 {
+            return Err(ToolError::invalid("Give 1–30 fields."));
+        }
+        let w = open_window(a.window)?;
+        let _com = Com::init()?;
+        let auto = uia()?;
+        let editable: Vec<IUIAutomationElement> = all_elements(&auto, w.hwnd)?
+            .into_iter()
+            .filter(|e| {
+                let t = ctype(e);
+                t == UIA_EditControlTypeId.0 || t == UIA_ComboBoxControlTypeId.0 || t == UIA_DocumentControlTypeId.0
+            })
+            .collect();
+        // Resolve every field before changing anything.
+        let mut targets = Vec::new();
+        for f in &a.fields {
+            let want = norm(&f.label);
+            let exact: Vec<&IUIAutomationElement> = editable.iter().filter(|e| norm(&name(e)) == want).collect();
+            let candidates = if exact.is_empty() { editable.iter().filter(|e| norm(&name(e)).contains(&want)).collect() } else { exact };
+            match candidates.as_slice() {
+                [one] => {
+                    if is_password(one) {
+                        return Err(ToolError::denied(format!("“{}” is a password field; the assistant won't fill it.", f.label)));
+                    }
+                    targets.push(((*one).clone(), f));
+                }
+                [] => {
+                    let names: Vec<String> = editable.iter().map(name).filter(|n| !n.trim().is_empty()).take(20).collect();
+                    return Err(ToolError::not_found(format!(
+                        "No field labelled “{}”. Fields with names: {}",
+                        f.label,
+                        if names.is_empty() { "none (try app_get_ui_tree refs with app_type)".into() } else { names.join(", ") }
+                    )));
+                }
+                _ => return Err(ToolError::invalid(format!("Several fields match “{}”; use a more specific label or app_type with a ref.", f.label))),
+            }
+        }
+        let mut results = Vec::new();
+        let mut ok_count = 0;
+        for (e, f) in targets {
+            let r = (|| -> Result<bool, ToolError> {
+                let p: IUIAutomationValuePattern = pattern(&e, UIA_ValuePatternId).map_err(|_| ToolError::invalid("doesn't accept text"))?;
+                if flag(unsafe { p.CurrentIsReadOnly() }) {
+                    return Err(ToolError::invalid("read-only"));
+                }
+                unsafe {
+                    let _ = e.SetFocus();
+                    p.SetValue(&BSTR::from(f.value.as_str())).map_err(err)?;
+                }
+                Ok(value(&e).is_some_and(|v| v == f.value))
+            })();
+            let (ok, confirmed, error) = match r {
+                Ok(c) => (true, c, None),
+                Err(e) => (false, false, Some(e.message)),
+            };
+            if ok {
+                ok_count += 1;
+            }
+            results.push(json!({ "label": f.label, "filled": ok, "value_confirmed": confirmed, "error": error }));
+        }
+        Ok(ToolOutput {
+            content: json!({ "fields": results, "note": "Nothing was submitted. Review, then save/submit with app_menu, app_click or app_input." }),
+            summary: format!("Filled {ok_count} of {} fields in “{}”", a.fields.len(), clip(&w.title, 60)),
+            file: None,
+        })
+    }
+
     fn unsupported() -> ToolError {
         ToolError::new(
             "unsupported_control",
@@ -1032,6 +1455,17 @@ mod imp {
                 let a: InputArgs = parse(args)?;
                 let w = open_window(a.window)?;
                 Ok(Some(format!("{} in “{}” (sends real mouse/keyboard input)", describe_input(&a)?, clip(&w.title, 80))))
+            }
+            "app_menu" => {
+                let a: MenuArgs = parse(args)?;
+                let w = open_window(a.window)?;
+                Ok(Some(format!("Use the menu {} in “{}”", a.path.join(" › "), clip(&w.title, 80))))
+            }
+            "app_fill_form" => {
+                let a: FormArgs = parse(args)?;
+                let w = open_window(a.window)?;
+                let fields: Vec<String> = a.fields.iter().map(|f| format!("{}: “{}”", f.label, clip(&f.value, 60))).collect();
+                Ok(Some(format!("Fill in “{}”:\n• {}", clip(&w.title, 80), fields.join("\n• "))))
             }
             "app_screenshot_analyze" => {
                 let window = args.get("window").and_then(Value::as_i64).ok_or_else(|| ToolError::invalid("`window` is required."))?;
@@ -1148,6 +1582,8 @@ mod imp {
                 Ok(ToolOutput { content: json!({ "action": action, "element": what }), summary: format!("{action}: {what}"), file: None })
             }
             "app_window" => window_action(&parse(args)?),
+            "app_menu" => menu(&parse(args)?),
+            "app_fill_form" => fill_form(&parse(args)?),
             "app_input" => input(&parse(args)?),
             "app_list_installed" => {
                 let apps: Vec<Value> = installed_apps().into_iter().map(|(n, p)| json!({ "name": n, "shortcut": p })).collect();

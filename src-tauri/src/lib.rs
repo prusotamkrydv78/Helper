@@ -13,7 +13,10 @@ mod google;
 mod graph;
 mod state;
 mod tools;
+mod voice;
 mod workflows;
+
+use std::sync::Arc;
 
 use tauri::Manager;
 
@@ -32,12 +35,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(background::shortcut_plugin())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![background::MINIMIZED_ARG]),
         ))
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
+            tools::fs_ops::set_journal_dir(&config_dir);
+            desktop::set_layout_dir(&config_dir);
             let state = state::AppState::new(&config_dir);
             // Close the browser session after a period of inactivity.
             let browser = std::sync::Arc::clone(&state.browser);
@@ -47,6 +53,7 @@ pub fn run() {
                     browser.shutdown_if_idle().await;
                 }
             });
+            Arc::clone(&state.clipboard).watch();
             app.manage(state);
             background::setup(app)?;
             Ok(())
@@ -67,6 +74,23 @@ pub fn run() {
             workflows::schedules_load,
             workflows::schedules_save,
             workflows::workflow_plan,
+            workflows::rules_load,
+            workflows::triggers_load,
+            workflows::triggers_save,
+            workflows::layouts_load,
+            workflows::layouts_save,
+            workflows::layout_capture,
+            workflows::layout_preview,
+            workflows::layout_apply,
+            workflows::documents_search,
+            system::trigger_state,
+            memory::memory_update,
+            workflows::rules_save,
+            workflows::organize_rule_preview,
+            workflows::organize_rule_apply,
+            workflows::file_undo_list,
+            workflows::file_undo_preview,
+            workflows::file_undo_apply,
             memory::memory_list,
             memory::memory_add,
             memory::memory_delete,
@@ -74,6 +98,15 @@ pub fn run() {
             audit::audit_recent,
             audit::audit_clear,
             background::notify,
+            background::shortcuts_set,
+            voice::voice_listen,
+            voice::voice_cancel,
+            clipboard::clipboard_history_get,
+            clipboard::clipboard_history_set_enabled,
+            clipboard::clipboard_history_pin,
+            clipboard::clipboard_history_delete,
+            clipboard::clipboard_history_clear,
+            clipboard::clipboard_history_restore,
             background::set_keep_in_tray,
             background::autostart_get,
             background::autostart_set,

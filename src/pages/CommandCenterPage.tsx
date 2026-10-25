@@ -96,6 +96,24 @@ function QuickActionsCard() {
   const [app, setApp] = useState("");
   const [mail, setMail] = useState("");
   const [workflowId, setWorkflowId] = useState("");
+  const [goal, setGoal] = useState("");
+  const [planning, setPlanning] = useState(false);
+  // Task chaining: the model plans steps (no tools run); the draft opens on the Workflows page to edit and start.
+  const planGoal = () => {
+    const g = goal.trim();
+    if (!g) return;
+    setPlanning(true);
+    void wf
+      .plan(g)
+      .then((steps) => {
+        wf.create({ title: "", goal: g, steps });
+        setGoal("");
+        actions.setView("workflows");
+        toast(`Planned ${steps.length} steps. Review and start it on the Workflows page.`, "success");
+      })
+      .catch((e) => toast(message(e), "error"))
+      .finally(() => setPlanning(false));
+  };
   const templates = workflows.filter((w) => !w.scheduleId && (w.status === "draft" || w.status === "paused"));
   // Quick actions are ordinary chat requests: the assistant uses its tools under your permissions and approvals.
   const ask = (text: string) => actions.startChat(text);
@@ -108,6 +126,12 @@ function QuickActionsCard() {
           <Input aria-label="App to open" value={app} onChange={(e) => setApp(e.target.value)} placeholder="App name, e.g. Notepad" />
           <Button type="submit" variant="outline" icon={<AppWindow className="size-3.5" />} disabled={!app.trim()}>
             Launch
+          </Button>
+        </form>
+        <form className={row} onSubmit={(e) => (e.preventDefault(), planGoal())}>
+          <Input aria-label="Goal to plan" value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="Goal, e.g. tidy Downloads and email me a summary" />
+          <Button type="submit" variant="outline" icon={<WorkflowIcon className="size-3.5" />} loading={planning} disabled={!goal.trim() || planning}>
+            Plan
           </Button>
         </form>
         <form className={row} onSubmit={(e) => (e.preventDefault(), mail.trim() && ask(`Search my email for: ${mail.trim()}. Summarize what you find.`))}>

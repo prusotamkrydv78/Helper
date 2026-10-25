@@ -26,7 +26,8 @@ import type {
 import { load, remove, save } from "../lib/storage";
 import { nowISO, titleFromPrompt, uid } from "../lib/utils";
 import { DEFAULT_PERMISSIONS, DEFAULT_SETTINGS } from "./defaults";
-import { notifyIfAway } from "../services/tauri/assistant";
+import { featureService } from "../services/tauri/assistant";
+import { speak, stopSpeaking } from "../lib/speech";
 import { isTaskActive, reducer, type AppState, type UIState } from "./reducer";
 
 // ---------------------------------------------------------------------------
@@ -175,6 +176,8 @@ export interface Actions {
 
   sendMessage(text: string, attachments?: Attachment[]): void;
   stopGeneration(conversationId: ID): void;
+  /** Stops every running reply/tool (and pending approvals), speech and voice input. */
+  stopAll(): void;
   /** Creates a conversation without switching to it. */
   createWorkflowConversation(title: string): ID;
   /** Sends `text` as a user turn in that conversation and resolves when the reply ends. */
@@ -458,8 +461,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
                   ...(e.status === "running" ? { progress: e.summary ?? undefined } : terminal ? { progress: undefined } : {}),
                 },
               });
-              if (e.status === "awaiting_approval")
-                notifyIfAway(stateRef.current.settings.notifications, "Approval needed", e.summary || "The assistant is waiting for your approval.");
               if (e.file) dispatch({ type: "file_change", taskId: liveTaskId, file: { ...e.file, simulated: false } });
               syncLiveTaskStatus();
               break;
@@ -518,6 +519,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         }
         dispatch({ type: "set_streaming", conversationId, value: false });
         if (streams.current.get(conversationId) === controller) streams.current.delete(conversationId);
+      })
+      .then(() => {
+        const st = stateRef.current.settings;
+        if (finalStatus === "complete" && st.speakReplies && replyText.trim()) speak(replyText, st.voiceName, st.speechRate);
       })
       .then(() => ({
         status: finalStatus === "stopped" ? "stopped" : finalStatus === "error" ? "error" : "complete",
@@ -597,6 +602,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       togglePin: (id) => dispatch({ type: "toggle_pin", id }),
 
       sendMessage: (text, attachments) => {
+        stopSpeaking();
         const content = text.trim();
         if (!content) return;
         let convId = stateRef.current.ui.activeConversationId;
@@ -621,6 +627,11 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         runAssistant(convId, toHistory([...(conv?.messages ?? []), userMsg], stateRef.current.tasks));
       },
       stopGeneration: (conversationId) => streams.current.get(conversationId)?.abort(),
+      stopAll: () => {
+        streams.current.forEach((c) => c.abort());
+        stopSpeaking();
+        void featureService.voiceCancel();
+      },
       createWorkflowConversation: (title) => createConversation(title),
       runTurn: async (conversationId, text) => {
         // A conversation created moments ago may not be in stateRef yet; it then has no history.

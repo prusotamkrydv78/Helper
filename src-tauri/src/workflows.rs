@@ -14,6 +14,9 @@ use crate::state::AppState;
 
 const WORKFLOWS_FILE: &str = "workflows.json";
 const SCHEDULES_FILE: &str = "schedules.json";
+const RULES_FILE: &str = "organize_rules.json";
+const TRIGGERS_FILE: &str = "triggers.json";
+const LAYOUTS_FILE: &str = "layouts.json";
 const MAX_BYTES: usize = 5 * 1024 * 1024;
 const MAX_STEPS: usize = 20;
 const MAX_STEP_CHARS: usize = 500;
@@ -47,6 +50,133 @@ pub fn schedules_load(app: AppHandle) -> Result<Value, AppError> {
 #[tauri::command]
 pub fn schedules_save(app: AppHandle, schedules: Value) -> Result<(), AppError> {
     save_list(&app, SCHEDULES_FILE, schedules)
+}
+
+#[tauri::command]
+pub fn triggers_load(app: AppHandle) -> Result<Value, AppError> {
+    load_list(&app, TRIGGERS_FILE)
+}
+
+#[tauri::command]
+pub fn triggers_save(app: AppHandle, triggers: Value) -> Result<(), AppError> {
+    save_list(&app, TRIGGERS_FILE, triggers)
+}
+
+#[tauri::command]
+pub fn layouts_load(app: AppHandle) -> Result<Value, AppError> {
+    load_list(&app, LAYOUTS_FILE)
+}
+
+#[tauri::command]
+pub fn layouts_save(app: AppHandle, layouts: Value) -> Result<(), AppError> {
+    save_list(&app, LAYOUTS_FILE, layouts)
+}
+
+fn desktop_err(e: crate::tools::ToolError) -> AppError {
+    AppError::invalid(e.message)
+}
+
+/// Current open windows as a layout (to save under a name).
+#[tauri::command]
+pub async fn layout_capture() -> Result<Vec<crate::desktop::LayoutWindow>, AppError> {
+    crate::desktop::run_isolated(crate::desktop::capture_layout).await.map_err(desktop_err)
+}
+
+#[tauri::command]
+pub async fn layout_preview(windows: Vec<crate::desktop::LayoutWindow>) -> Result<Vec<Value>, AppError> {
+    crate::desktop::run_isolated(move || crate::desktop::preview_layout(&windows)).await.map_err(desktop_err)
+}
+
+/// Applies a layout after the user confirmed the preview. Missing apps are launched only from the allow-list.
+#[tauri::command]
+pub async fn layout_apply(
+    state: State<'_, AppState>,
+    windows: Vec<crate::desktop::LayoutWindow>,
+    launch_missing: bool,
+    allowed_apps: Vec<String>,
+) -> Result<Value, AppError> {
+    let started = std::time::Instant::now();
+    let n = windows.len();
+    let v = crate::desktop::run_isolated(move || crate::desktop::restore_layout(&windows, launch_missing, &allowed_apps)).await.map_err(desktop_err)?;
+    state.audit.record("settings", "workspace_layouts", &json!({ "windows": n, "launch_missing": launch_missing }), "completed", Some(&format!("arranged {}", v["arranged"])), started.elapsed().as_millis());
+    Ok(v)
+}
+
+/// Local document search for the UI ("Ask your documents"); nothing is sent anywhere.
+#[tauri::command]
+pub async fn documents_search(state: State<'_, AppState>, path: String, query: String) -> Result<Value, AppError> {
+    let g = guard_of(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::tools::fs_ops::document_search(&g, crate::tools::fs_ops::DocSearchArgs { path, query, top: Some(8) }).map(|o| o.content).map_err(tool_err)
+    })
+    .await
+    .map_err(|e| AppError::internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub fn rules_load(app: AppHandle) -> Result<Value, AppError> {
+    load_list(&app, RULES_FILE)
+}
+
+#[tauri::command]
+pub fn rules_save(app: AppHandle, rules: Value) -> Result<(), AppError> {
+    save_list(&app, RULES_FILE, rules)
+}
+
+fn guard_of(state: &AppState) -> crate::tools::paths::PathGuard {
+    crate::tools::paths::PathGuard::new(&state.allowed_dirs.snapshot())
+}
+
+fn tool_err(e: crate::tools::ToolError) -> AppError {
+    AppError::invalid(e.message)
+}
+
+/// Preview of a file-organizing rule (nothing changes).
+#[tauri::command]
+pub async fn organize_rule_preview(state: State<'_, AppState>, rule: Value) -> Result<String, AppError> {
+    let g = guard_of(&state);
+    tauri::async_runtime::spawn_blocking(move || crate::tools::fs_ops::preview(&g, "organize_files", &rule).map_err(tool_err))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+}
+
+/// Applies a rule after the user confirmed its preview in the UI. Recorded in the activity log and undo history.
+#[tauri::command]
+pub async fn organize_rule_apply(state: State<'_, AppState>, rule: Value) -> Result<Value, AppError> {
+    let g = guard_of(&state);
+    let args = rule.clone();
+    let started = std::time::Instant::now();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        crate::tools::parse::<crate::tools::fs_ops::OrganizeArgs>(&args).and_then(|a| crate::tools::fs_ops::organize_files(&g, a)).map_err(tool_err)
+    })
+    .await
+    .map_err(|e| AppError::internal(e.to_string()))??;
+    state.audit.record("settings", "organize_files", &rule, "completed", Some(&out.summary), started.elapsed().as_millis());
+    Ok(out.content)
+}
+
+#[tauri::command]
+pub fn file_undo_list() -> Vec<crate::tools::fs_ops::JournalEntry> {
+    crate::tools::fs_ops::journal_list()
+}
+
+#[tauri::command]
+pub async fn file_undo_preview(state: State<'_, AppState>, id: u64) -> Result<String, AppError> {
+    let g = guard_of(&state);
+    tauri::async_runtime::spawn_blocking(move || crate::tools::fs_ops::undo_preview(&g, id).map_err(tool_err))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn file_undo_apply(state: State<'_, AppState>, id: u64) -> Result<Value, AppError> {
+    let g = guard_of(&state);
+    let started = std::time::Instant::now();
+    let out = tauri::async_runtime::spawn_blocking(move || crate::tools::fs_ops::undo(&g, id).map_err(tool_err))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))??;
+    state.audit.record("settings", "undo_file_changes", &json!({ "id": id }), "completed", Some(&out.summary), started.elapsed().as_millis());
+    Ok(out.content)
 }
 
 fn load_list(app: &AppHandle, name: &str) -> Result<Value, AppError> {

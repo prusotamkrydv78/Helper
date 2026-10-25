@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Schedule, Workflow } from "../../types";
+import type { Schedule, Trigger, Workflow } from "../../types";
 import { load, save } from "../../lib/storage";
 import { isTauri } from "./tauriAi";
 
@@ -26,4 +26,20 @@ export const scheduleService = {
     if (isTauri()) await invoke("schedules_save", { schedules });
     else save("schedules", schedules);
   },
+};
+
+export interface TriggerState {
+  processes: string[];
+  battery: { present: boolean; percent?: number | null; on_ac_power?: boolean } | null;
+  drives: { drive: string; free_gb: number }[];
+}
+
+/** Proactive triggers (Rust backend) and the system state they're checked against. */
+export const triggerService = {
+  load: async (): Promise<Trigger[]> => (isTauri() ? ((await invoke("triggers_load")) as Trigger[]) : load<Trigger[]>("triggers", [])),
+  save: async (list: Trigger[]): Promise<void> => {
+    if (isTauri()) await invoke("triggers_save", { triggers: list });
+    else save("triggers", list);
+  },
+  state: async (): Promise<TriggerState | null> => (isTauri() ? ((await invoke("trigger_state")) as TriggerState) : null),
 };

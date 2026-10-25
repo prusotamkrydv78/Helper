@@ -60,6 +60,7 @@ fn offered_tools(state: &AppState, guard: &PathGuard, perms: ToolPermissions, ha
             ToolKind::Desktop => {
                 cfg!(windows)
                     && perms.apps != PermissionLevel::Deny
+                    && (t.name != "open_file" || guard.has_roots())
                     && (has_apps || t.name != "app_launch")
                     && (t.name != "app_input" || perms.input != PermissionLevel::Deny)
             }
@@ -219,7 +220,7 @@ fn system_prompt(req: &ChatRequest, guard: &PathGuard, perms: ToolPermissions, b
          verify the outcome (re-read the page, window, file or status) before relying on it. If something fails, \
          try a reasonable alternative once; if you're still blocked (missing permission, unsupported control, \
          ambiguous choice, needed credentials), stop and ask the user a specific question instead of guessing. \
-         Use memory_save only for durable facts the user would want kept, never for secrets.\
+         Use memory_save only for durable facts the user asked you to remember or clearly wants kept; never for secrets, and never infer or save sensitive personal details (health, religion, politics, finances, relationships) without the user explicitly asking. For questions about the user's files, use document_search and cite file names.\
          \n\nNever claim an action succeeded unless the tool result confirms it. If a tool fails or the user \
          declines it, say so plainly. When an action needs approval (changing files, submitting forms, typing into \
          sensitive fields, downloads), call the tool directly: the app shows the user an approval prompt before \
@@ -279,7 +280,7 @@ async fn execute_calls(
             arguments: p.args.as_ref().map(display_args).unwrap_or_else(|_| Value::String(p.call.arguments.clone())),
             // Browser approvals depend on the target element and are decided when the call runs.
             requires_approval: p.spec.is_some_and(|s| !matches!(s.kind, ToolKind::Browser | ToolKind::Desktop | ToolKind::System | ToolKind::Graph | ToolKind::Google | ToolKind::Clipboard | ToolKind::Delete)
-                    && !matches!(s.name, "move_files" | "copy_files" | "rename_files" | "organize_files"))
+                    && !matches!(s.name, "move_files" | "copy_files" | "rename_files" | "organize_files" | "undo_file_changes"))
                 && p.level == PermissionLevel::Ask,
             read_only: p.spec.is_some_and(|s| s.kind == ToolKind::Read),
         });
@@ -523,7 +524,7 @@ async fn run_one(
                 status(emit, id, ToolCallStatus::Cancelled);
                 return Err(AppError::cancelled());
             }
-            r = desktop::run_isolated(move || clipboard::execute(spec, &args)) => r,
+            r = { let h = Arc::clone(&state.clipboard); desktop::run_isolated(move || clipboard::execute(spec, &args, &h)) } => r,
         }
     } else if spec.kind == ToolKind::System {
         tokio::select! {
@@ -532,6 +533,15 @@ async fn run_one(
                 return Err(AppError::cancelled());
             }
             r = desktop::run_isolated(move || system::execute(spec, &args)) => r,
+        }
+    } else if spec.name == "open_file" {
+        let g = Arc::clone(guard);
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                status(emit, id, ToolCallStatus::Cancelled);
+                return Err(AppError::cancelled());
+            }
+            r = desktop::run_isolated(move || desktop::open_document(&g, &args)) => r,
         }
     } else if spec.kind == ToolKind::Desktop {
         let apps = req.allowed_apps.clone();

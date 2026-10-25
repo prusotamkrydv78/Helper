@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { CalendarClock, Pause, Pencil, Play, Trash2, Info } from "lucide-react";
-import type { ID, Schedule, WorkflowScheduleKind } from "../types";
+import { CalendarClock, Pause, Pencil, Play, Trash2, Info, Zap } from "lucide-react";
+import type { ID, Schedule, Trigger, TriggerKind, WorkflowScheduleKind } from "../types";
 import { Button } from "../components/ui/Button";
-import { Badge, Field, Input, Segmented, Select } from "../components/ui/primitives";
+import { Badge, Field, Input, Segmented, Select, Switch } from "../components/ui/primitives";
 import { ConfirmDialog, useToast } from "../components/ui/overlays";
 import { useWorkflows } from "../store/WorkflowStore";
 import { localTimeZone, MIN_INTERVAL_MINUTES, useSchedules, type ScheduleInput } from "../store/ScheduleStore";
@@ -55,7 +55,7 @@ export function SchedulesSection() {
   };
   const submit = () => {
     if (!form) return;
-    if (!form.workflowId) return void toast("Choose a workflow.", "error");
+    if (form.action !== "reminder" && !form.workflowId) return void toast("Choose a workflow.", "error");
     if (guard(() => (editing ? update(editing, form) : create(form)))) {
       setForm(null);
       setEditing(null);
@@ -70,7 +70,7 @@ export function SchedulesSection() {
           <CalendarClock className="size-4" /> Schedules
         </h2>
         {!form && (
-          <Button size="sm" variant="outline" disabled={!templates.length} onClick={() => setForm(blank(templates[0]?.id))}>
+          <Button size="sm" variant="outline" onClick={() => setForm(blank(templates[0]?.id ?? ""))}>
             New schedule
           </Button>
         )}
@@ -86,6 +86,17 @@ export function SchedulesSection() {
 
       {form && (
         <div className="mb-4 rounded-xl border border-border bg-surface p-4">
+          <Field label="Action">
+            {(id) => (
+              <Select id={id} value={form.action ?? "workflow"} onChange={(e) => set({ action: e.target.value as "workflow" | "reminder" })}>
+                <option value="workflow">Run a workflow</option>
+                <option value="reminder">Show a reminder</option>
+              </Select>
+            )}
+          </Field>
+          {form.action === "reminder" ? (
+            <Field label="Reminder text">{(id) => <Input id={id} value={form.message ?? ""} onChange={(e) => set({ message: e.target.value })} />}</Field>
+          ) : (
           <Field label="Workflow">
             {(id) => (
               <Select id={id} value={form.workflowId} onChange={(e) => set({ workflowId: e.target.value })}>
@@ -97,6 +108,7 @@ export function SchedulesSection() {
               </Select>
             )}
           </Field>
+          )}
           <Field label="Repeat" inline>
             {() => (
               <Segmented<WorkflowScheduleKind>
@@ -185,7 +197,7 @@ export function SchedulesSection() {
             <div key={s.id} className="rounded-lg border border-border bg-surface px-3 py-2">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div className="min-w-0 text-sm">
-                  <p className="font-medium">{template?.title ?? "Deleted workflow"}</p>
+                  <p className="font-medium">{s.action === "reminder" ? `Reminder: ${s.message}` : (template?.title ?? "Deleted workflow")}</p>
                   <p className="text-fg-muted">
                     {describe(s)} · missed runs: {s.missedPolicy === "skip" ? "skipped" : "run once"}
                   </p>
@@ -238,6 +250,141 @@ export function SchedulesSection() {
         description="It won't run again. The workflow itself and past runs are kept."
         confirmLabel="Delete"
       />
+    </section>
+  );
+}
+
+const TRIGGER_KINDS: { value: TriggerKind; label: string; hint: string }[] = [
+  { value: "app_started", label: "An app starts", hint: "Program file name, e.g. excel.exe" },
+  { value: "battery_below", label: "Battery below", hint: "Percent, e.g. 20 (only on battery power)" },
+  { value: "disk_below", label: "Free disk space below", hint: "GB, e.g. 10" },
+];
+
+const blankTrigger = (): Trigger => ({
+  id: `trg-${Date.now()}`,
+  name: "",
+  enabled: true,
+  kind: "battery_below",
+  value: "20",
+  action: "reminder",
+  message: "",
+  cooldownMinutes: 60,
+});
+
+/** Proactive triggers: opt-in, checked every 30 s while the app runs; each firing says why. */
+export function TriggersSection() {
+  const { workflows } = useWorkflows();
+  const { triggers, saveTriggers } = useSchedules();
+  const toast = useToast();
+  const [draft, setDraft] = useState<Trigger | null>(null);
+  const templates = workflows.filter((w) => !w.scheduleId);
+  const save = (list: Trigger[]) => void saveTriggers(list).catch((e) => toast(e instanceof Error ? e.message : "Couldn't save triggers", "error"));
+
+  return (
+    <section className="mt-8">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h2 className="flex items-center gap-2 font-medium">
+          <Zap className="size-4" /> Triggers
+        </h2>
+        {!draft && (
+          <Button size="sm" variant="outline" onClick={() => setDraft(blankTrigger())}>
+            New trigger
+          </Button>
+        )}
+      </div>
+      <p className="mb-3 text-xs text-fg-muted">
+        Triggers react to an app starting, low battery or low disk space while this app runs. They fire when the condition becomes true (not again until it
+        clears and the cooldown passes) and the notification says why. A trigger can post a reminder or start a workflow; workflow actions still ask for
+        approval as usual.
+      </p>
+      {draft && (
+        <div className="mb-4 rounded-xl border border-border bg-surface p-4">
+          <Field label="Name">{(id) => <Input id={id} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="Low battery" />}</Field>
+          <Field label="When">
+            {(id) => (
+              <Select id={id} value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value as TriggerKind })}>
+                {TRIGGER_KINDS.map((k) => (
+                  <option key={k.value} value={k.value}>
+                    {k.label}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+          <Field label="Value" description={TRIGGER_KINDS.find((k) => k.value === draft.kind)?.hint}>
+            {(id) => <Input id={id} value={draft.value} onChange={(e) => setDraft({ ...draft, value: e.target.value })} />}
+          </Field>
+          <Field label="Then">
+            {(id) => (
+              <Select id={id} value={draft.action} onChange={(e) => setDraft({ ...draft, action: e.target.value as Trigger["action"] })}>
+                <option value="reminder">Show a reminder</option>
+                <option value="workflow">Start a workflow</option>
+              </Select>
+            )}
+          </Field>
+          {draft.action === "reminder" ? (
+            <Field label="Reminder text">{(id) => <Input id={id} value={draft.message ?? ""} onChange={(e) => setDraft({ ...draft, message: e.target.value })} />}</Field>
+          ) : (
+            <Field label="Workflow">
+              {(id) => (
+                <Select id={id} value={draft.workflowId ?? ""} onChange={(e) => setDraft({ ...draft, workflowId: e.target.value })}>
+                  <option value="">Choose…</option>
+                  {templates.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.title}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          )}
+          <Field label="Cooldown (minutes)">
+            {(id) => <Input id={id} type="number" min={1} value={draft.cooldownMinutes} onChange={(e) => setDraft({ ...draft, cooldownMinutes: Math.max(1, Number(e.target.value) || 1) })} />}
+          </Field>
+          <div className="flex gap-2 pt-3">
+            <Button
+              variant="primary"
+              disabled={!draft.name.trim() || !draft.value.trim() || (draft.action === "workflow" ? !draft.workflowId : !draft.message?.trim())}
+              onClick={() => {
+                const clean = { ...draft, active: undefined };
+                save(triggers.some((t) => t.id === draft.id) ? triggers.map((t) => (t.id === draft.id ? clean : t)) : [...triggers, clean]);
+                setDraft(null);
+              }}
+            >
+              Save trigger
+            </Button>
+            <Button variant="ghost" onClick={() => setDraft(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+      <div className="space-y-2">
+        {triggers.map((t) => (
+          <div key={t.id} className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm">
+            <div className="min-w-0">
+              <p className="font-medium">{t.name}</p>
+              <p className="text-fg-muted">
+                {TRIGGER_KINDS.find((k) => k.value === t.kind)?.label} {t.value} →{" "}
+                {t.action === "reminder" ? `reminder “${t.message}”` : `workflow “${workflows.find((w) => w.id === t.workflowId)?.title ?? "deleted"}”`}
+              </p>
+              <p className="text-xs text-fg-subtle">
+                Last fired: {t.lastFiredAt ? new Date(t.lastFiredAt).toLocaleString() : "never"}
+                {t.lastNote ? ` · ${t.lastNote}` : ""}
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <Switch label={`Enable ${t.name}`} checked={t.enabled} onChange={(v) => save(triggers.map((x) => (x.id === t.id ? { ...x, enabled: v, active: undefined } : x)))} />
+              <Button size="sm" variant="ghost" onClick={() => setDraft({ ...t })}>
+                Edit
+              </Button>
+              <Button size="sm" variant="danger-ghost" icon={<Trash2 className="size-3.5" />} onClick={() => save(triggers.filter((x) => x.id !== t.id))}>
+                Delete
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

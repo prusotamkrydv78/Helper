@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  Bell,
   LayoutDashboard,
   ListOrdered,
   History,
@@ -21,6 +22,7 @@ import {
 import type { Conversation, View } from "../../types";
 import { cn, dateBucket } from "../../lib/utils";
 import { useStore } from "../../store/AppStore";
+import { useNotifications } from "../../store/NotificationStore";
 import { isTaskActive } from "../../store/reducer";
 import { Button } from "../ui/Button";
 import { ConfirmDialog, Menu, Tooltip } from "../ui/overlays";
@@ -28,6 +30,7 @@ import { Kbd, Skeleton } from "../ui/primitives";
 
 const NAV: { view: View; label: string; icon: typeof MessageSquare }[] = [
   { view: "home", label: "Command Center", icon: LayoutDashboard },
+  { view: "notifications", label: "Notifications", icon: Bell },
   { view: "chat", label: "Chats", icon: MessageSquare },
   { view: "tasks", label: "Tasks", icon: ListChecks },
   { view: "workflows", label: "Workflows", icon: ListOrdered },
@@ -36,6 +39,7 @@ const NAV: { view: View; label: string; icon: typeof MessageSquare }[] = [
 
 export function Sidebar({ searchRef }: { searchRef: React.RefObject<HTMLInputElement | null> }) {
   const { state, actions } = useStore();
+  const { unread } = useNotifications();
   const collapsed = state.ui.sidebarCollapsed;
   const [query, setQuery] = useState("");
   const [deleting, setDeleting] = useState<Conversation | null>(null);
@@ -136,6 +140,9 @@ export function Sidebar({ searchRef }: { searchRef: React.RefObject<HTMLInputEle
             >
               <Icon className="size-4 shrink-0" />
               {!collapsed && label}
+              {view === "notifications" && unread > 0 && (
+                <span className="ml-auto rounded-full bg-accent px-1.5 text-[10px] font-medium text-accent-fg">{unread}</span>
+              )}
               {!collapsed && badge}
               {collapsed && badge && (
                 <span className={cn("absolute right-2 top-1.5 size-1.5 rounded-full", awaitingCount ? "bg-warning" : "bg-info")} />

@@ -4,9 +4,10 @@ import { isTauri } from "./tauriAi";
 export interface MemoryNote {
   id: string;
   text: string;
-  category: "preference" | "project" | "task" | "other";
+  category: "preference" | "instruction" | "app" | "project" | "task" | "other";
   createdAt: number;
   source: "user" | "assistant";
+  enabled: boolean;
 }
 
 export interface AuditEntry {
@@ -30,6 +31,8 @@ export const assistantService = {
   memoryAdd: async (text: string, category: string): Promise<MemoryNote> =>
     isTauri() ? invoke("memory_add", { text, category }) : desktopOnly(),
   memoryDelete: async (id: string): Promise<boolean> => (isTauri() ? invoke("memory_delete", { id }) : false),
+  memoryUpdate: async (id: string, patch: { text?: string; category?: string; enabled?: boolean }): Promise<MemoryNote> =>
+    invoke("memory_update", { id, text: patch.text ?? null, category: patch.category ?? null, enabled: patch.enabled ?? null }),
   memoryClear: async (): Promise<void> => (isTauri() ? invoke("memory_clear") : undefined),
   auditRecent: async (limit = 200): Promise<AuditEntry[]> => (isTauri() ? invoke("audit_recent", { limit }) : []),
   auditClear: async (): Promise<void> => (isTauri() ? invoke("audit_clear") : undefined),
@@ -100,4 +103,102 @@ export interface SystemStatus {
   processes_total: number;
   top_processes_by_memory: { pid: number; name: string; memory_mb: number }[];
   network: { route_to_internet: boolean; local_ip?: string };
+}
+
+// ---- clipboard history, file rules, shortcuts, voice ----------------------------
+
+export interface ClipItem {
+  id: number;
+  kind: "text" | "image";
+  text: string | null;
+  width: number | null;
+  height: number | null;
+  bytes: number;
+  pinned: boolean;
+  at: number;
+  preview: string | null;
+}
+
+export interface ClipHistoryView {
+  enabled: boolean;
+  skippedSensitive: number;
+  items: ClipItem[];
+}
+
+export interface OrganizeRule {
+  id: string;
+  name: string;
+  path: string;
+  by: "extension" | "year" | "month" | "pattern";
+  pattern?: string;
+  extensions?: string[];
+  target?: string;
+}
+
+export interface UndoEntry {
+  id: number;
+  at: number;
+  label: string;
+  moves: [string, string][];
+}
+
+/** Only the fields the backend's organize tool accepts. */
+export const ruleArgs = (r: OrganizeRule) => ({
+  path: r.path,
+  by: r.by,
+  ...(r.pattern?.trim() ? { pattern: r.pattern.trim() } : {}),
+  ...(r.extensions?.length ? { extensions: r.extensions } : {}),
+  ...(r.by === "pattern" ? { target: r.target ?? "" } : {}),
+});
+
+export const featureService = {
+  clipHistory: async (query?: string): Promise<ClipHistoryView | null> => (isTauri() ? invoke("clipboard_history_get", { query: query || null }) : null),
+  clipSetEnabled: async (enabled: boolean): Promise<void> => (isTauri() ? invoke("clipboard_history_set_enabled", { enabled }) : undefined),
+  clipPin: async (id: number, pinned: boolean): Promise<void> => invoke("clipboard_history_pin", { id, pinned }),
+  clipDelete: async (id: number): Promise<void> => invoke("clipboard_history_delete", { id }),
+  clipClear: async (): Promise<void> => (isTauri() ? invoke("clipboard_history_clear") : undefined),
+  clipRestore: async (id: number): Promise<void> => invoke("clipboard_history_restore", { id }),
+
+  rulesLoad: async (): Promise<OrganizeRule[]> => (isTauri() ? invoke("rules_load") : []),
+  rulesSave: async (rules: OrganizeRule[]): Promise<void> => (isTauri() ? invoke("rules_save", { rules }) : desktopOnly()),
+  rulePreview: async (r: OrganizeRule): Promise<string> => invoke("organize_rule_preview", { rule: ruleArgs(r) }),
+  ruleApply: async (r: OrganizeRule): Promise<{ moved: number; failed: number }> => invoke("organize_rule_apply", { rule: ruleArgs(r) }),
+  undoList: async (): Promise<UndoEntry[]> => (isTauri() ? invoke("file_undo_list") : []),
+  undoPreview: async (id: number): Promise<string> => invoke("file_undo_preview", { id }),
+  undoApply: async (id: number): Promise<{ moved: number; failed: number }> => invoke("file_undo_apply", { id }),
+
+  /** Returns the shortcuts that couldn't be registered. */
+  setShortcuts: async (map: Record<string, string>): Promise<string[]> => (isTauri() ? invoke("shortcuts_set", { map }) : []),
+  voiceListen: async (): Promise<string> => (isTauri() ? invoke("voice_listen") : desktopOnly()),
+  voiceCancel: async (): Promise<void> => (isTauri() ? invoke("voice_cancel") : undefined),
+
+  layoutsLoad: async (): Promise<{ name: string; windows: LayoutWindow[] }[]> => (isTauri() ? invoke("layouts_load") : []),
+  layoutsSave: async (layouts: { name: string; windows: LayoutWindow[] }[]): Promise<void> => invoke("layouts_save", { layouts }),
+  layoutCapture: async (): Promise<LayoutWindow[]> => invoke("layout_capture"),
+  layoutPreview: async (windows: LayoutWindow[]): Promise<LayoutPreviewRow[]> => invoke("layout_preview", { windows }),
+  layoutApply: async (windows: LayoutWindow[], launchMissing: boolean, allowedApps: string[]): Promise<{ arranged: number; launched?: string[] }> =>
+    invoke("layout_apply", { windows, launchMissing, allowedApps }),
+  /** Local only: nothing is sent to the AI. */
+  documentsSearch: async (path: string, query: string): Promise<{ results: DocResult[]; searched_files: number }> => invoke("documents_search", { path, query }),
+};
+
+export interface LayoutWindow {
+  exe: string;
+  title: string;
+  rect: [number, number, number, number];
+  state: "normal" | "maximized" | "minimized";
+}
+
+export interface LayoutPreviewRow {
+  exe: string;
+  title: string;
+  state: string;
+  match: { window: number; title: string } | null;
+}
+
+export interface DocResult {
+  file: string;
+  line: number;
+  score: number;
+  excerpt: string;
 }

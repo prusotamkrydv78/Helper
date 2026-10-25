@@ -2,6 +2,12 @@ import { useState, type ReactNode } from "react";
 import {
   Bot,
   BellRing,
+  Clipboard,
+  FileSearch,
+  LayoutGrid,
+  FolderTree,
+  Keyboard,
+  Mic,
   Brain,
   Database,
   Plug,
@@ -23,7 +29,7 @@ import {
 import type { PermissionLevel, Settings } from "../types";
 import { useStore } from "../store/AppStore";
 import { DEFAULT_PERMISSIONS } from "../store/defaults";
-import { ActivityLogSection, BackgroundSection, DataSection, GoogleSection, MemorySection, MicrosoftSection } from "./AssistantSettings";
+import { ActivityLogSection, BackgroundSection, ClipboardSection, DataSection, DocumentsSection, FileRulesSection, GoogleSection, WorkspacesSection, ShortcutsSection, VoiceSection, MemorySection, MicrosoftSection } from "./AssistantSettings";
 import { toBackendError } from "../services/tauri/tauriAi";
 import { Page, PageHeader } from "../components/layout/Page";
 import { Button } from "../components/ui/Button";
@@ -39,6 +45,12 @@ const SECTIONS = [
   { id: "microsoft", label: "Accounts", icon: Plug },
   { id: "memory", label: "Memory", icon: Brain },
   { id: "background", label: "Background", icon: BellRing },
+  { id: "shortcuts", label: "Shortcuts", icon: Keyboard },
+  { id: "voice", label: "Voice", icon: Mic },
+  { id: "clipboard", label: "Clipboard", icon: Clipboard },
+  { id: "rules", label: "File rules", icon: FolderTree },
+  { id: "workspaces", label: "Workspaces", icon: LayoutGrid },
+  { id: "documents", label: "Documents", icon: FileSearch },
   { id: "activity", label: "Activity log", icon: ScrollText },
   { id: "privacy", label: "Privacy & execution", icon: Shield },
   { id: "data", label: "Data", icon: Database },
@@ -175,6 +187,18 @@ export function SettingsPage() {
           <MemorySection />
 
           <BackgroundSection />
+
+          <ShortcutsSection />
+
+          <VoiceSection />
+
+          <ClipboardSection />
+
+          <FileRulesSection />
+
+          <WorkspacesSection />
+
+          <DocumentsSection />
 
           <ActivityLogSection />
 

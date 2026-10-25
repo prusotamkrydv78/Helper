@@ -3,8 +3,9 @@
 A desktop AI assistant built with Tauri 2, Rust, React 19, TypeScript and Vite.
 
 **Current status:** chat is live through OpenAI when an API key is configured.
-Tasks, automations and the local PC agent are still simulated. The app does not
-run commands or touch your files.
+The assistant can use four real file tools (list, read, create folder, write
+file), but only inside folders you explicitly allow. Automations and the local
+PC agent are still simulated. There are no shell, delete or code-execution tools.
 
 ## Prerequisites (Windows)
 
@@ -45,11 +46,40 @@ install in Settings → AI model.
 
 Without a key, chat falls back to a clearly labeled mock, so the UI stays usable.
 
+## File tools
+
+| Tool | What it does | Permission setting |
+| --- | --- | --- |
+| `list_files` | Lists a folder (optionally 3 levels deep, max 500 entries) | “Read files” (default: allowed) |
+| `read_file` | Reads a UTF-8 text file (first 200 KB) | “Read files” |
+| `create_directory` | Creates a folder | “Create & modify files” (default: ask first) |
+| `write_file` | Creates a text file; replaces one only when `overwrite` is true (max 1 MB) | “Create & modify files” |
+
+**Safety rules (enforced in Rust):**
+
+- Tools only work inside folders added in Settings → Allowed folders. With none added, no tools are offered to the model.
+- Every path is canonicalized (symlinks resolved) and must be inside an allowed folder. Paths containing `..` are rejected outright.
+- Whole drives can't be added as allowed folders.
+- Each call has a 30-second timeout. **Stop** cancels the model stream, pending approvals and running tools.
+- The model gets the real tool output. Failures, declined approvals and timeouts go back to it as errors, so it can't report a success that didn't happen.
+
+### Try it
+
+1. Create a test folder (e.g. `C:\Users\<you>\AI Test`) and put a text file in it.
+2. In Settings → Allowed folders, click **Add folder…** and choose that folder.
+3. In a new chat, ask: *“List the files in my folder, read notes.txt, then write summary.md with its key points.”*
+4. Approve the write when asked. The file appears on disk, and the task card shows each tool's real result.
+5. Ask it to read `../something.txt`. The backend refuses, and the model tells you so.
+
+Each tool call is logged with its request and call IDs, for example `running read_file (call_…)` followed by `completed in 1.2ms`.
+
+**OpenAI note:** some reasoning models (e.g. `gpt-6-luna`) reject function tools on Chat Completions unless reasoning is off. The app detects that specific error, retries with `reasoning_effort: "none"`, and remembers it for that model. Set `OPENAI_REASONING_EFFORT` to override.
+
 ## Checks
 
 ```bash
 npm run build                          # TypeScript type-check + production frontend build
-cd src-tauri && cargo test             # Rust unit tests (SSE parser, history, error mapping)
+cd src-tauri && cargo test             # Rust unit tests (SSE, history, errors, path guard, file tools)
 cd src-tauri && cargo clippy           # optional lint
 ```
 
@@ -65,11 +95,13 @@ src/                       React frontend
   services/mock/           Mock chat/tasks/automations (used when nothing is configured)
   store/AppStore.tsx       App state; picks live vs mock chat at runtime
 src-tauri/src/
-  commands.rs              chat_stream, chat_cancel, ai_status, set_api_key, clear_api_key
+  commands.rs              chat, API key, tool-approval and allowed-folder commands
   config.rs                API key resolution (env → OS credential store)
   error.rs                 Typed errors: { kind, message, retryable, status }
   state.rs                 HTTP client + in-flight request registry for cancellation
-  ai/openai.rs             OpenAI Chat Completions streaming client, retries, error mapping
+  ai/agent.rs              Tool-calling loop (round → tools → results → round)
+  ai/openai.rs             OpenAI Chat Completions streaming client, tool-call assembly, retries
+  tools/                   Tool registry, path guard, file tools, allowed folders
   ai/sse.rs                Incremental Server-Sent Events parser
   ai/history.rs            Conversation normalization (ordering, roles, size limit)
   ai/types.rs              Request/stream event types shared with the frontend
@@ -82,7 +114,15 @@ Transient failures (429, 5xx, network) are retried automatically up to twice
 before any text arrives. After that, the error is shown with **Try again**.
 Error kinds about the key or model also offer **Open settings**.
 
-**Next phase:** tool calling will add tool definitions to the request in
-`ai/openai.rs` and new `StreamEvent` variants for tool calls. Those events will
-drive the existing task UI. Real PC actions will need a permission-controlled
-local executor, which hasn't been built yet.
+**Tool calling:** `ai/agent.rs` runs the loop:
+
+1. Stream a completion.
+2. Run any tools the model requests. Consecutive auto-allowed read-only calls run concurrently; writes run one at a time, in the order requested.
+3. Send the results back as `role: "tool"` messages.
+4. Repeat until the model answers, up to “Max steps per task”.
+
+`tools/` holds the registry (`mod.rs`), path confinement (`paths.rs`), the four tools (`fs.rs`) and the allowed-folder store (`allowed_dirs.rs`). Tool events (`tool_call`, `tool_status`) stream over the same Tauri channel and drive the existing task UI.
+
+**Known limits:** tool-call turns aren't saved in chat history, so follow-up
+messages see the final answer but not the raw tool results. The model decides
+whether to request several tools at once; independent reads run concurrently when it does.

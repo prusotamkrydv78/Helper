@@ -101,6 +101,8 @@ export interface Task {
   finishedAt?: ISODate;
   error?: string;
   recovery?: string;
+  /** Live tasks: the chat request that runs them (for approvals). */
+  requestId?: ID;
   /** Demo tasks never touch the real system. */
   isDemo: boolean;
 }

@@ -129,12 +129,23 @@ export function ApprovalPrompt({ task, step }: { task: Task; step: TaskStep }) {
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm font-medium">Approval required</p>
             <Badge tone={risk.tone}>{risk.label}</Badge>
-            {task.isDemo && <Badge tone="neutral">Demo — nothing will run</Badge>}
+            {task.isDemo ? (
+              <Badge tone="neutral">Demo — nothing will run</Badge>
+            ) : (
+              <Badge tone="warning">Changes files on your PC</Badge>
+            )}
           </div>
-          <p className="mt-1 text-sm text-fg-muted">
-            The assistant wants to use <code className="font-mono text-fg">{step.tool}</code> to{" "}
-            {step.description.charAt(0).toLowerCase() + step.description.slice(1)}.
-          </p>
+          {task.isDemo ? (
+            <p className="mt-1 text-sm text-fg-muted">
+              The assistant wants to use <code className="font-mono text-fg">{step.tool}</code> to{" "}
+              {step.description.charAt(0).toLowerCase() + step.description.slice(1)}.
+            </p>
+          ) : (
+            <p className="mt-1 text-sm text-fg-muted">
+              The assistant wants to run <span className="font-medium text-fg">{step.title}</span> on{" "}
+              <code className="break-all font-mono text-fg">{step.description}</code>. Review the input below before approving.
+            </p>
+          )}
           <div className="mt-3 flex flex-wrap gap-2">
             <Button
               size="sm"

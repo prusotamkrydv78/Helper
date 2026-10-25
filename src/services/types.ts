@@ -8,7 +8,9 @@ import type {
   Conversation,
   ID,
   Message,
+  PermissionLevel,
   Settings,
+  StepStatus,
   Task,
   TaskStep,
 } from "../types";
@@ -18,6 +20,13 @@ export interface ChatRequest {
   /** Full ordered history including the new user message. */
   messages: Pick<Message, "role" | "content">[];
   settings: Pick<Settings, "model" | "systemPrompt" | "maxStepsPerTask">;
+  /** File tool permissions, enforced by the backend. */
+  permissions: { read: PermissionLevel; write: PermissionLevel };
+}
+
+export interface ToolFileChange {
+  path: string;
+  kind: "created" | "modified";
 }
 
 /** Events emitted while an assistant response is produced, in order. */
@@ -25,6 +34,28 @@ export type ChatEvent =
   | { type: "start"; model: string }
   | { type: "token"; text: string }
   | { type: "task_started"; task: Task }
+  /** Live backend: id of the request (used to answer tool approvals). */
+  | { type: "request"; requestId: string }
+  /** Live backend: the model asked to run a real tool. */
+  | {
+      type: "tool_call";
+      callId: string;
+      name: string;
+      title: string;
+      arguments: unknown;
+      requiresApproval: boolean;
+      readOnly: boolean;
+    }
+  /** Live backend: real progress/result of a tool call. */
+  | {
+      type: "tool_status";
+      callId: string;
+      status: Exclude<StepStatus, "pending">;
+      summary?: string | null;
+      output?: string | null;
+      error?: string | null;
+      file?: ToolFileChange | null;
+    }
   | { type: "done" }
   | { type: "error"; message: string; kind?: string; retryable?: boolean };
 
@@ -71,6 +102,13 @@ export interface AiConfigService {
   status(): Promise<AiStatus>;
   setApiKey(key: string): Promise<AiStatus>;
   clearApiKey(): Promise<AiStatus>;
+  /** Answers a live tool-approval prompt. */
+  resolveToolApproval(requestId: string, callId: string, approved: boolean): Promise<boolean>;
+  /** Folders the file tools may access. */
+  listAllowedDirs(): Promise<string[]>;
+  /** Opens a folder picker; resolves to the new list, or null if cancelled. */
+  addAllowedDir(): Promise<string[] | null>;
+  removeAllowedDir(path: string): Promise<string[]>;
 }
 
 export interface Backend {

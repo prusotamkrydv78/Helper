@@ -3,6 +3,9 @@
 use tauri::ipc::Channel;
 use tauri::State;
 
+use tauri_plugin_dialog::DialogExt;
+
+use crate::ai::agent;
 use crate::ai::types::{ChatRequest, StreamEvent};
 use crate::config::{self, AiStatus};
 use crate::error::{AppError, ErrorKind};
@@ -26,16 +29,14 @@ pub async fn chat_stream(
     on_event: Channel<StreamEvent>,
 ) -> Result<(), AppError> {
     let token = state.register(&request.request_id);
+    let emit = |ev: StreamEvent| {
+        if let Err(e) = on_event.send(ev) {
+            log::warn!("failed to deliver stream event: {e}");
+        }
+    };
     let result = async {
         let (key, _) = blocking(config::resolve).await?.ok_or_else(AppError::missing_api_key)?;
-        state
-            .ai
-            .stream_chat(&key, &request, &token, |ev| {
-                if let Err(e) = on_event.send(ev) {
-                    log::warn!("failed to deliver stream event: {e}");
-                }
-            })
-            .await
+        agent::run(&state, &key, &request, &token, &emit).await
     }
     .await;
     state.unregister(&request.request_id);
@@ -82,4 +83,31 @@ pub async fn clear_api_key() -> Result<AiStatus, AppError> {
         config::status()
     })
     .await
+}
+
+/// Answers a pending tool-approval prompt. Returns false if nothing was waiting.
+#[tauri::command]
+pub fn resolve_tool_approval(state: State<'_, AppState>, request_id: String, call_id: String, approved: bool) -> bool {
+    log::info!("tool approval for {request_id}/{call_id}: {}", if approved { "approved" } else { "declined" });
+    state.resolve_approval(&request_id, &call_id, approved)
+}
+
+#[tauri::command]
+pub fn list_allowed_dirs(state: State<'_, AppState>) -> Vec<String> {
+    state.allowed_dirs.list()
+}
+
+/// Opens a native folder picker and permits the chosen folder.
+/// Returns the updated list, or None if the user cancelled the picker.
+#[tauri::command]
+pub async fn add_allowed_dir(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<Vec<String>>, AppError> {
+    let picked = app.dialog().file().set_title("Allow the assistant to use this folder").blocking_pick_folder();
+    let Some(picked) = picked else { return Ok(None) };
+    let path = picked.into_path().map_err(|e| AppError::invalid(format!("Unsupported folder: {e}")))?;
+    state.allowed_dirs.add(&path).map(Some)
+}
+
+#[tauri::command]
+pub fn remove_allowed_dir(state: State<'_, AppState>, path: String) -> Result<Vec<String>, AppError> {
+    state.allowed_dirs.remove(&path)
 }

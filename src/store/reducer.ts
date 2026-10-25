@@ -50,6 +50,9 @@ export type Action =
   | { type: "add_task"; task: Task }
   | { type: "task_status"; taskId: ID; status: Task["status"]; error?: string; recovery?: string }
   | { type: "step_update"; taskId: ID; step: TaskStep }
+  | { type: "add_step"; taskId: ID; step: TaskStep }
+  | { type: "patch_step"; taskId: ID; stepId: ID; patch: Partial<TaskStep> }
+  | { type: "patch_task"; taskId: ID; patch: Partial<Task> }
   | { type: "file_change"; taskId: ID; file: FileChange }
   | { type: "set_automations"; automations: Automation[] }
   | { type: "automations_status"; status: AppState["automationsStatus"] }
@@ -146,6 +149,15 @@ export function reducer(state: AppState, action: Action): AppState {
         ...t,
         steps: t.steps.map((s) => (s.id === action.step.id ? action.step : s)),
       }));
+    case "add_step":
+      return mapTask(state, action.taskId, (t) => ({ ...t, steps: [...t.steps, action.step] }));
+    case "patch_step":
+      return mapTask(state, action.taskId, (t) => ({
+        ...t,
+        steps: t.steps.map((s) => (s.id === action.stepId ? { ...s, ...action.patch } : s)),
+      }));
+    case "patch_task":
+      return mapTask(state, action.taskId, (t) => ({ ...t, ...action.patch }));
     case "file_change":
       return mapTask(state, action.taskId, (t) => ({ ...t, files: [...t.files, action.file] }));
 

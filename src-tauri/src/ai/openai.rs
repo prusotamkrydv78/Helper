@@ -1,10 +1,10 @@
-//! OpenAI Chat Completions client (raw HTTP + SSE streaming).
+//! OpenAI Chat Completions client (raw HTTP + SSE streaming, with tool calls).
 //!
 //! Configuration (environment, optional):
 //! - `OPENAI_MODEL`    default model when the UI doesn't specify one
 //! - `OPENAI_BASE_URL` alternative API base, e.g. a proxy (default `https://api.openai.com/v1`)
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
@@ -12,9 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::history;
 use super::sse::SseParser;
-use super::types::{ChatRequest, StreamEvent, StreamSummary};
 use crate::config::ApiKey;
 use crate::error::{AppError, ErrorKind};
 
@@ -25,12 +23,6 @@ pub const FALLBACK_MODEL: &str = "gpt-4o-mini";
 const MAX_RETRIES: u32 = 2;
 
 #[derive(Serialize)]
-struct WireMessage<'a> {
-    role: &'static str,
-    content: &'a str,
-}
-
-#[derive(Serialize)]
 struct StreamOptions {
     include_usage: bool,
 }
@@ -38,15 +30,48 @@ struct StreamOptions {
 #[derive(Serialize)]
 struct CompletionBody<'a> {
     model: &'a str,
-    messages: Vec<WireMessage<'a>>,
+    messages: &'a [Value],
     stream: bool,
     stream_options: StreamOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
+}
+
+/// Some reasoning models reject function tools on Chat Completions unless
+/// reasoning is turned off; the API says so in this error message.
+fn needs_reasoning_off(err: &AppError) -> bool {
+    err.kind == ErrorKind::InvalidRequest && err.message.contains("reasoning_effort") && err.message.contains("'none'")
+}
+
+/// A complete tool call assembled from streamed fragments.
+#[derive(Debug, Clone)]
+pub struct ToolCallRequest {
+    pub id: String,
+    pub name: String,
+    /// Raw JSON arguments string as produced by the model.
+    pub arguments: String,
+}
+
+/// The outcome of one streamed completion.
+#[derive(Debug, Clone)]
+pub struct Round {
+    pub model: String,
+    pub text: String,
+    pub tool_calls: Vec<ToolCallRequest>,
+    pub finish_reason: Option<String>,
+    pub output_tokens: Option<u64>,
 }
 
 pub struct OpenAiClient {
     http: reqwest::Client,
     url: String,
     default_model: String,
+    /// `OPENAI_REASONING_EFFORT`, sent with every request when set.
+    reasoning_effort: Option<String>,
+    /// Models found to need `reasoning_effort: "none"` when tools are offered.
+    reasoning_off_with_tools: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl OpenAiClient {
@@ -68,40 +93,37 @@ impl OpenAiClient {
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| FALLBACK_MODEL.to_owned());
+        let reasoning_effort = std::env::var("OPENAI_REASONING_EFFORT")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
         log::info!("OpenAI client ready: base={base} default_model={default_model}");
-        Self { http, url: format!("{base}/chat/completions"), default_model }
+        Self {
+            http,
+            url: format!("{base}/chat/completions"),
+            default_model,
+            reasoning_effort,
+            reasoning_off_with_tools: Default::default(),
+        }
     }
 
-    /// Streams one assistant reply, calling `emit` for each event in order.
-    pub async fn stream_chat(
+    pub fn resolve_model(&self, requested: Option<&str>) -> String {
+        requested.map(str::trim).filter(|m| !m.is_empty()).unwrap_or(&self.default_model).to_owned()
+    }
+
+    /// Streams one completion. Text deltas go to `on_text` as they arrive;
+    /// tool calls are returned once complete.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_round(
         &self,
         key: &ApiKey,
-        req: &ChatRequest,
+        model: &str,
+        messages: &[Value],
+        tools: Option<&Value>,
+        request_id: &str,
         cancel: &CancellationToken,
-        mut emit: impl FnMut(StreamEvent),
-    ) -> Result<StreamSummary, AppError> {
-        let history = history::normalize(&req.messages)?;
-        let model = req
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|m| !m.is_empty())
-            .unwrap_or(&self.default_model);
-
-        let system = req.system_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let mut messages = Vec::with_capacity(history.len() + 1);
-        if let Some(s) = system {
-            messages.push(WireMessage { role: "system", content: s });
-        }
-        messages.extend(history.iter().map(|m| WireMessage { role: m.role.as_str(), content: &m.content }));
-
-        let body = CompletionBody {
-            model,
-            messages,
-            stream: true,
-            stream_options: StreamOptions { include_usage: true },
-        };
-
+        on_text: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<Round, AppError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let mut auth = HeaderValue::from_str(&format!("Bearer {}", key.expose()))
@@ -109,24 +131,30 @@ impl OpenAiClient {
         auth.set_sensitive(true);
         headers.insert(AUTHORIZATION, auth);
 
-        log::info!(
-            "chat request {} started: model={model} messages={} conversation={}",
-            req.request_id,
-            history.len(),
-            req.conversation_id
-        );
-        let started = Instant::now();
-        let response = self.send_with_retries(&headers, &body, &req.request_id, cancel).await?;
-        let summary = read_stream(response, model, cancel, &mut emit).await?;
-        log::info!(
-            "chat request {} finished in {:?}: model={} finish_reason={:?} output_tokens={:?}",
-            req.request_id,
-            started.elapsed(),
-            summary.model,
-            summary.stop_reason,
-            summary.output_tokens
-        );
-        Ok(summary)
+        let known_off = tools.is_some()
+            && self.reasoning_off_with_tools.lock().unwrap_or_else(|e| e.into_inner()).contains(model);
+        let effort = |off: bool| if off { Some("none") } else { self.reasoning_effort.as_deref() };
+        let body = |off: bool| CompletionBody {
+            model,
+            messages,
+            stream: true,
+            stream_options: StreamOptions { include_usage: true },
+            tools,
+            reasoning_effort: effort(off),
+        };
+
+        let response = match self.send_with_retries(&headers, &body(known_off), request_id, cancel).await {
+            Err(e) if tools.is_some() && !known_off && self.reasoning_effort.is_none() && needs_reasoning_off(&e) => {
+                log::info!("{model} needs reasoning_effort=none with tools; retrying and remembering");
+                self.reasoning_off_with_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(model.to_owned());
+                self.send_with_retries(&headers, &body(true), request_id, cancel).await?
+            }
+            other => other?,
+        };
+        read_stream(response, model, cancel, on_text).await
     }
 
     async fn send_with_retries(
@@ -178,16 +206,24 @@ impl OpenAiClient {
     }
 }
 
+#[derive(Default)]
+struct PartialCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
 async fn read_stream(
     response: reqwest::Response,
     requested_model: &str,
     cancel: &CancellationToken,
-    emit: &mut impl FnMut(StreamEvent),
-) -> Result<StreamSummary, AppError> {
+    on_text: &mut (dyn FnMut(&str) + Send),
+) -> Result<Round, AppError> {
     let mut stream = response.bytes_stream();
     let mut parser = SseParser::default();
     let mut model = requested_model.to_owned();
-    let mut started = false;
+    let mut text = String::new();
+    let mut calls: Vec<PartialCall> = Vec::new();
     let mut finish_reason: Option<String> = None;
     let mut output_tokens: Option<u64> = None;
     let mut refusal = String::new();
@@ -219,24 +255,44 @@ async fn read_stream(
             if data.get("error").is_some_and(|e| !e.is_null()) {
                 return Err(api_error(&data["error"], None));
             }
-            if !started {
-                if let Some(m) = data["model"].as_str() {
-                    model = m.to_owned();
-                }
-                emit(StreamEvent::Start { model: model.clone() });
-                started = true;
+            if let Some(m) = data["model"].as_str() {
+                model = m.to_owned();
             }
             if let Some(n) = data["usage"]["completion_tokens"].as_u64() {
                 output_tokens = Some(n);
             }
             let Some(choice) = data["choices"].get(0) else { continue };
-            if let Some(t) = choice["delta"]["content"].as_str() {
+            let delta = &choice["delta"];
+            if let Some(t) = delta["content"].as_str() {
                 if !t.is_empty() {
-                    emit(StreamEvent::Delta { text: t.to_owned() });
+                    text.push_str(t);
+                    on_text(t);
                 }
             }
-            if let Some(r) = choice["delta"]["refusal"].as_str() {
+            if let Some(r) = delta["refusal"].as_str() {
                 refusal.push_str(r);
+            }
+            // Tool calls stream as fragments keyed by `index`.
+            if let Some(parts) = delta["tool_calls"].as_array() {
+                for part in parts {
+                    let idx = part["index"].as_u64().unwrap_or(0) as usize;
+                    if idx > 64 {
+                        continue; // guard against absurd indices
+                    }
+                    if calls.len() <= idx {
+                        calls.resize_with(idx + 1, PartialCall::default);
+                    }
+                    let c = &mut calls[idx];
+                    if let Some(id) = part["id"].as_str() {
+                        c.id = id.to_owned();
+                    }
+                    if let Some(n) = part["function"]["name"].as_str() {
+                        c.name.push_str(n);
+                    }
+                    if let Some(a) = part["function"]["arguments"].as_str() {
+                        c.arguments.push_str(a);
+                    }
+                }
             }
             if let Some(r) = choice["finish_reason"].as_str() {
                 finish_reason = Some(r.to_owned());
@@ -255,7 +311,17 @@ async fn read_stream(
         };
         return Err(AppError::new(ErrorKind::Refusal, msg));
     }
-    Ok(StreamSummary { model, stop_reason: finish_reason, output_tokens })
+    let tool_calls = calls
+        .into_iter()
+        .filter(|c| !c.name.is_empty())
+        .enumerate()
+        .map(|(i, c)| ToolCallRequest {
+            id: if c.id.is_empty() { format!("call_{i}") } else { c.id },
+            name: c.name,
+            arguments: c.arguments,
+        })
+        .collect();
+    Ok(Round { model, text, tool_calls, finish_reason, output_tokens })
 }
 
 fn network_error(e: &reqwest::Error) -> AppError {
@@ -333,19 +399,37 @@ mod tests {
 
     #[test]
     fn request_body_shape() {
+        let messages = vec![
+            serde_json::json!({ "role": "system", "content": "s" }),
+            serde_json::json!({ "role": "user", "content": "hi" }),
+        ];
+        let tools = crate::tools::openai_definitions(crate::tools::TOOLS.iter());
         let body = CompletionBody {
             model: "m",
-            messages: vec![
-                WireMessage { role: "system", content: "s" },
-                WireMessage { role: "user", content: "hi" },
-            ],
+            messages: &messages,
             stream: true,
             stream_options: StreamOptions { include_usage: true },
+            tools: Some(&tools),
+            reasoning_effort: None,
         };
         let v: Value = serde_json::to_value(&body).unwrap();
         assert_eq!(v["stream"], true);
         assert_eq!(v["stream_options"]["include_usage"], true);
-        assert_eq!(v["messages"][0]["role"], "system");
         assert_eq!(v["messages"][1]["content"], "hi");
+        assert_eq!(v["tools"][0]["type"], "function");
+        assert_eq!(v["tools"][0]["function"]["name"], "list_files");
+
+        let no_tools = CompletionBody { tools: None, ..body };
+        assert!(serde_json::to_value(&no_tools).unwrap().get("tools").is_none());
+    }
+
+    #[test]
+    fn detects_reasoning_off_requirement() {
+        let e = http_error(
+            400,
+            r#"{"error":{"message":"Function tools with reasoning_effort are not supported for gpt-6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.","type":"invalid_request_error"}}"#,
+        );
+        assert!(needs_reasoning_off(&e));
+        assert!(!needs_reasoning_off(&http_error(400, r#"{"error":{"message":"bad"}}"#)));
     }
 }

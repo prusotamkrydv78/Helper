@@ -19,6 +19,7 @@ import type {
   ID,
   Message,
   Settings,
+  StepStatus,
   Task,
   View,
 } from "../types";
@@ -47,6 +48,23 @@ function loadSettings(): Settings {
 const isLive = (ai: AiStatus | null): boolean => Boolean(ai?.available && ai.configured && backend.liveChat);
 
 /** History sent to the model: in order, without failed replies or mock (demo) text. */
+/** One-line description of a tool call for the step list, e.g. the path it touches. */
+function describeToolArgs(args: unknown): string {
+  if (!args || typeof args !== "object") return "Invalid arguments";
+  const a = args as Record<string, unknown>;
+  const path = typeof a.path === "string" ? shortPath(a.path) : "";
+  const extras = [a.recursive === true && "recursive", a.overwrite === true && "overwrite"].filter(Boolean);
+  return [path || "(no path)", ...extras].join(" · ");
+}
+
+/** Keeps the meaningful end of long paths: "…\workspace\summary\todo.md". */
+function shortPath(p: string): string {
+  if (p.length <= 48) return p;
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  const sep = p.includes("\\") ? "\\" : "/";
+  return parts.length > 3 ? `…${sep}${parts.slice(-3).join(sep)}` : p;
+}
+
 function toHistory(messages: Message[]): Pick<Message, "role" | "content">[] {
   return messages
     .filter((m) => m.status !== "error" && m.source !== "mock" && m.content.trim())
@@ -143,6 +161,9 @@ export interface Actions {
   /** Rejects with a BackendError (e.g. invalid key format) — callers show it. */
   saveApiKey(key: string): Promise<void>;
   removeApiKey(): Promise<void>;
+  /** Opens a folder picker; resolves true if a folder was added. Rejects with a BackendError. */
+  addAllowedDir(): Promise<boolean>;
+  removeAllowedDir(path: string): Promise<void>;
 }
 
 interface StoreValue {
@@ -153,6 +174,8 @@ interface StoreValue {
   ai: AiStatus | null;
   /** True when chat goes to the real AI backend (otherwise the mock). */
   liveChat: boolean;
+  /** Folders the real file tools may access. */
+  allowedDirs: string[];
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -165,6 +188,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef(state);
   stateRef.current = state;
   const [ai, setAi] = useState<AiStatus | null>(null);
+  const [allowedDirs, setAllowedDirs] = useState<string[]>([]);
   const aiRef = useRef(ai);
   aiRef.current = ai;
 
@@ -194,6 +218,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     backend.ai
       .status()
       .then((s) => alive && setAi(s))
+      .then(() => backend.ai.listAllowedDirs())
+      .then((d) => alive && Array.isArray(d) && setAllowedDirs(d))
       .catch(() => alive && setAi({ available: true, provider: "openai", configured: false, source: null, keyHint: null }));
     return () => {
       alive = false;
@@ -284,6 +310,39 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     streams.current.get(conversationId)?.abort();
     streams.current.set(conversationId, controller);
     let finalStatus: Message["status"] = "complete";
+    let finalError: string | undefined;
+
+    // Live tool calls are tracked as a (non-demo) task on this assistant message.
+    let requestId: string | undefined;
+    let liveTaskId: ID | null = null;
+    const stepStatus = new Map<string, StepStatus>();
+    const ensureLiveTask = (): ID => {
+      if (liveTaskId) return liveTaskId;
+      const lastUser = [...history].reverse().find((m) => m.role === "user")?.content ?? "";
+      const task: Task = {
+        id: uid("task"),
+        conversationId,
+        title: "File tools",
+        summary: titleFromPrompt(lastUser),
+        status: "running",
+        steps: [],
+        files: [],
+        createdAt: nowISO(),
+        isDemo: false,
+        requestId,
+      };
+      liveTaskId = task.id;
+      dispatch({ type: "add_task", task });
+      dispatch({ type: "patch_message", conversationId, messageId: assistant.id, patch: { taskId: task.id } });
+      if (stateRef.current.settings.showTaskPanelAutomatically)
+        dispatch({ type: "set_ui", patch: { panelOpen: true, panelTaskId: task.id } });
+      return task.id;
+    };
+    const syncLiveTaskStatus = () => {
+      if (!liveTaskId) return;
+      const awaiting = [...stepStatus.values()].includes("awaiting_approval");
+      dispatch({ type: "task_status", taskId: liveTaskId, status: awaiting ? "awaiting_approval" : "running" });
+    };
 
     chat
       .streamChat(
@@ -291,12 +350,58 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
           conversationId,
           messages: history,
           settings: { model: s.model, systemPrompt: s.systemPrompt, maxStepsPerTask: s.maxStepsPerTask },
+          permissions: {
+            read: s.permissions.find((p) => p.tool === "fs.read")?.level ?? "allow",
+            write: s.permissions.find((p) => p.tool === "fs.write")?.level ?? "ask",
+          },
         },
         (e) => {
           switch (e.type) {
             case "start":
               dispatch({ type: "patch_message", conversationId, messageId: assistant.id, patch: { model: e.model } });
               break;
+            case "request":
+              requestId = e.requestId;
+              break;
+            case "tool_call": {
+              const taskId = ensureLiveTask();
+              stepStatus.set(e.callId, "pending");
+              dispatch({
+                type: "add_step",
+                taskId,
+                step: {
+                  id: e.callId,
+                  tool: e.name,
+                  title: e.title,
+                  description: describeToolArgs(e.arguments),
+                  status: "pending",
+                  input: e.arguments && typeof e.arguments === "object" ? (e.arguments as Record<string, unknown>) : { raw: e.arguments },
+                  requiresApproval: e.requiresApproval,
+                  risk: e.readOnly ? "low" : "medium",
+                },
+              });
+              break;
+            }
+            case "tool_status": {
+              if (!liveTaskId) break;
+              stepStatus.set(e.callId, e.status);
+              const terminal = e.status !== "running" && e.status !== "awaiting_approval";
+              dispatch({
+                type: "patch_step",
+                taskId: liveTaskId,
+                stepId: e.callId,
+                patch: {
+                  status: e.status,
+                  ...(e.status === "running" ? { startedAt: nowISO() } : {}),
+                  ...(terminal ? { finishedAt: nowISO() } : {}),
+                  ...(e.output ? { result: { output: e.output, format: "json" as const } } : {}),
+                  ...(e.error ? { error: e.error } : {}),
+                },
+              });
+              if (e.file) dispatch({ type: "file_change", taskId: liveTaskId, file: { ...e.file, simulated: false } });
+              syncLiveTaskStatus();
+              break;
+            }
             case "token":
               dispatch({ type: "append_token", conversationId, messageId: assistant.id, text: e.text });
               break;
@@ -308,6 +413,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
               break;
             case "error":
               finalStatus = "error";
+              finalError = e.message;
               dispatch({
                 type: "patch_message",
                 conversationId,
@@ -334,6 +440,19 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       .finally(() => {
         if (controller.signal.aborted) finalStatus = "stopped";
         dispatch({ type: "patch_message", conversationId, messageId: assistant.id, patch: { status: finalStatus } });
+        if (liveTaskId) {
+          // Steps that never reached a final state didn't run (or were interrupted).
+          for (const [stepId, st] of stepStatus) {
+            if (st === "pending" || st === "running" || st === "awaiting_approval")
+              dispatch({ type: "patch_step", taskId: liveTaskId, stepId, patch: { status: "cancelled", finishedAt: nowISO() } });
+          }
+          dispatch({
+            type: "task_status",
+            taskId: liveTaskId,
+            status: finalStatus === "stopped" ? "cancelled" : finalStatus === "error" ? "failed" : "completed",
+            error: finalStatus === "error" ? finalError : finalStatus === "stopped" ? "Stopped by you." : undefined,
+          });
+        }
         dispatch({ type: "set_streaming", conversationId, value: false });
         if (streams.current.get(conversationId) === controller) streams.current.delete(conversationId);
       });
@@ -433,16 +552,44 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         runAssistant(conversationId, toHistory(conv.messages.slice(0, lastUserIdx + 1)));
       },
 
-      approveStep: (taskId, stepId) => void backend.tasks.approveStep(taskId, stepId),
-      rejectStep: (taskId, stepId) => void backend.tasks.rejectStep(taskId, stepId),
-      cancelTask: (taskId) => void backend.tasks.cancelTask(taskId),
+      // Demo tasks go to the mock; live tasks answer the real backend.
+      approveStep: (taskId, stepId) => {
+        const t = stateRef.current.tasks[taskId];
+        if (t && !t.isDemo && t.requestId) void backend.ai.resolveToolApproval(t.requestId, stepId, true);
+        else void backend.tasks.approveStep(taskId, stepId);
+      },
+      rejectStep: (taskId, stepId) => {
+        const t = stateRef.current.tasks[taskId];
+        if (t && !t.isDemo && t.requestId) void backend.ai.resolveToolApproval(t.requestId, stepId, false);
+        else void backend.tasks.rejectStep(taskId, stepId);
+      },
+      cancelTask: (taskId) => {
+        const t = stateRef.current.tasks[taskId];
+        if (t && !t.isDemo) streams.current.get(t.conversationId)?.abort();
+        else void backend.tasks.cancelTask(taskId);
+      },
       retryTask: (taskId) => {
         const old = stateRef.current.tasks[taskId];
         if (!old) return;
+        if (!old.isDemo) {
+          // A live task is retried by asking the model again.
+          const conv = stateRef.current.conversations.find((c) => c.id === old.conversationId);
+          if (!conv || stateRef.current.streaming[conv.id]) return;
+          const lastUserIdx = conv.messages.map((m) => m.role).lastIndexOf("user");
+          if (lastUserIdx >= 0) runAssistant(conv.id, toHistory(conv.messages.slice(0, lastUserIdx + 1)));
+          return;
+        }
         backend.tasks.retryTask(old).then((task) =>
           startTaskMessage(old.conversationId, task, `Retrying **${old.title}** from the beginning.`),
         );
       },
+
+      addAllowedDir: async () => {
+        const dirs = await backend.ai.addAllowedDir();
+        if (dirs) setAllowedDirs(dirs);
+        return dirs !== null;
+      },
+      removeAllowedDir: async (path) => setAllowedDirs(await backend.ai.removeAllowedDir(path)),
 
       reloadAutomations: () => {
         dispatch({ type: "automations_status", status: "loading" });
@@ -514,8 +661,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ state, actions, agent, ai, liveChat: isLive(ai) }),
-    [state, actions, agent, ai],
+    () => ({ state, actions, agent, ai, liveChat: isLive(ai), allowedDirs }),
+    [state, actions, agent, ai, allowedDirs],
   );
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }

@@ -1,8 +1,8 @@
-//! AI provider layer. The UI talks to `commands`, which talk to a provider here.
-//! Tool calling will plug in at `openai::stream_chat` (tool definitions in the
-//! request, `tool_calls` deltas surfaced as new `StreamEvent` variants).
+//! AI provider layer. `commands` calls `agent::run`, which drives the tool-calling
+//! loop over `openai` (streaming completions) and `crate::tools` (execution).
 
-pub mod openai;
+pub mod agent;
 pub mod history;
+pub mod openai;
 pub mod sse;
 pub mod types;

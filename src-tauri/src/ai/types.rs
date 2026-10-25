@@ -36,6 +36,43 @@ pub struct ChatRequest {
     /// Falls back to `OPENAI_MODEL`, then the built-in default.
     pub model: Option<String>,
     pub system_prompt: Option<String>,
+    /// User's tool permission settings (enforced here, not just in the UI).
+    #[serde(default)]
+    pub permissions: ToolPermissions,
+    /// Upper bound on tool-calling rounds for this request.
+    pub max_tool_rounds: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionLevel {
+    Allow,
+    Ask,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPermissions {
+    pub read: PermissionLevel,
+    pub write: PermissionLevel,
+}
+
+impl Default for ToolPermissions {
+    fn default() -> Self {
+        Self { read: PermissionLevel::Allow, write: PermissionLevel::Ask }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallStatus {
+    Running,
+    AwaitingApproval,
+    Completed,
+    Failed,
+    Skipped,
+    Cancelled,
 }
 
 /// Events streamed to the UI over a Tauri channel, in order.
@@ -49,6 +86,25 @@ pub enum StreamEvent {
     Start { model: String },
     /// A chunk of assistant text.
     Delta { text: String },
+    /// The model requested a tool call (emitted before it runs).
+    ToolCall {
+        call_id: String,
+        name: String,
+        title: String,
+        /// Arguments as sent by the model (long `content` values shortened for display).
+        arguments: serde_json::Value,
+        requires_approval: bool,
+        read_only: bool,
+    },
+    /// Progress or outcome of a tool call. `output` is the real tool result.
+    ToolStatus {
+        call_id: String,
+        status: ToolCallStatus,
+        summary: Option<String>,
+        output: Option<String>,
+        error: Option<String>,
+        file: Option<crate::tools::FileChange>,
+    },
     /// The response finished normally.
     Done { stop_reason: Option<String>, output_tokens: Option<u64> },
 }
@@ -56,7 +112,6 @@ pub enum StreamEvent {
 /// Result of a completed stream, used for logging and the final `Done` event.
 #[derive(Debug, Clone)]
 pub struct StreamSummary {
-    pub model: String,
     pub stop_reason: Option<String>,
     pub output_tokens: Option<u64>,
 }

@@ -18,6 +18,12 @@ const browserAiConfig: AiConfigService = {
     throw { kind: "internal", message: "API keys can only be saved in the desktop app.", retryable: false };
   },
   clearApiKey: async () => unavailable,
+  resolveToolApproval: async () => false,
+  listAllowedDirs: async () => [],
+  addAllowedDir: async () => {
+    throw { kind: "internal", message: "Folders can only be added in the desktop app.", retryable: false };
+  },
+  removeAllowedDir: async () => [],
 };
 
 /**

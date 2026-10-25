@@ -12,6 +12,24 @@ export const isTauri = (): boolean => typeof window !== "undefined" && "__TAURI_
 type RustStreamEvent =
   | { type: "start"; model: string }
   | { type: "delta"; text: string }
+  | {
+      type: "tool_call";
+      callId: string;
+      name: string;
+      title: string;
+      arguments: unknown;
+      requiresApproval: boolean;
+      readOnly: boolean;
+    }
+  | {
+      type: "tool_status";
+      callId: string;
+      status: "running" | "awaiting_approval" | "completed" | "failed" | "skipped" | "cancelled";
+      summary: string | null;
+      output: string | null;
+      error: string | null;
+      file: { path: string; kind: "created" | "modified" } | null;
+    }
   | { type: "done"; stopReason: string | null; outputTokens: number | null };
 
 /** Mirrors `AppError` in src-tauri/src/error.rs. */
@@ -34,6 +52,11 @@ export const tauriAiConfig: AiConfigService = {
   status: () => invoke<RustStatus>("ai_status").then(withAvailable),
   setApiKey: (apiKey) => invoke<RustStatus>("set_api_key", { apiKey }).then(withAvailable),
   clearApiKey: () => invoke<RustStatus>("clear_api_key").then(withAvailable),
+  resolveToolApproval: (requestId, callId, approved) =>
+    invoke<boolean>("resolve_tool_approval", { requestId, callId, approved }),
+  listAllowedDirs: () => invoke<string[]>("list_allowed_dirs"),
+  addAllowedDir: () => invoke<string[] | null>("add_allowed_dir"),
+  removeAllowedDir: (path) => invoke<string[]>("remove_allowed_dir", { path }),
 };
 
 export const tauriChat: ChatService = {
@@ -50,6 +73,12 @@ export const tauriChat: ChatService = {
         case "delta":
           onEvent({ type: "token", text: ev.text });
           break;
+        case "tool_call":
+          onEvent({ ...ev });
+          break;
+        case "tool_status":
+          onEvent({ ...ev });
+          break;
         case "done":
           ended = true;
           onEvent({ type: "done" });
@@ -59,6 +88,7 @@ export const tauriChat: ChatService = {
 
     const onAbort = () => void invoke("chat_cancel", { requestId }).catch(() => {});
     signal.addEventListener("abort", onAbort, { once: true });
+    onEvent({ type: "request", requestId });
     try {
       await invoke("chat_stream", {
         request: {
@@ -67,6 +97,8 @@ export const tauriChat: ChatService = {
           messages: req.messages,
           model: req.settings.model.trim() || null,
           systemPrompt: req.settings.systemPrompt,
+          permissions: req.permissions,
+          maxToolRounds: req.settings.maxStepsPerTask,
         },
         onEvent: channel,
       });

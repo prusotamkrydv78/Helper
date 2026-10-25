@@ -166,7 +166,7 @@ export function TaskPanel({ conversationTasks }: { conversationTasks: Task[] }) 
                 {activity.map((s) => (
                   <li key={s.id} className="flex items-center gap-2 text-xs">
                     <code className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[10.5px]">{s.tool}</code>
-                    <span className="truncate text-fg-muted">{s.error ? "error" : `${s.result?.format} result`}</span>
+                    <span className="truncate text-fg-muted">{s.status === "skipped" ? "declined" : s.error ? "error" : `${s.result?.format} result`}</span>
                     {s.finishedAt && <span className="ml-auto shrink-0 text-fg-subtle">{formatDateTime(s.finishedAt)}</span>}
                   </li>
                 ))}

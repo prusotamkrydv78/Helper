@@ -134,7 +134,7 @@ export function ChatView({ composerRef }: { composerRef: React.RefObject<Compose
             <Tooltip
               label={
                 liveChat
-                  ? "Chat is connected to OpenAI. Tasks and automations are still simulated."
+                  ? "Chat is connected to OpenAI. File tools work inside folders you allow; automations are still simulated."
                   : ai.available
                     ? "No API key configured — replies come from a mock service. Add a key in Settings."
                     : "Running outside the desktop app — replies come from a mock service."
@@ -251,7 +251,7 @@ export function ChatView({ composerRef }: { composerRef: React.RefObject<Compose
                 <p className="mt-2 text-center text-[11px] text-fg-subtle">
                   {!liveChat
                     ? "Demo mode — responses and task results are simulated. Nothing runs on your PC."
-                    : "AI responses can be wrong. Tasks are still simulated — nothing runs on your PC."}
+                    : "AI responses can be wrong. File tools only reach folders you allow, and changes need your approval."}
                 </p>
               </div>
             </div>

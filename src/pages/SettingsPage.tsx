@@ -2,6 +2,8 @@ import { useState, type ReactNode } from "react";
 import {
   Bot,
   Cpu,
+  Folder,
+  FolderPlus,
   Eye,
   KeyRound,
   EyeOff,
@@ -28,10 +30,14 @@ const SECTIONS = [
   { id: "general", label: "General", icon: SlidersHorizontal },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "model", label: "AI model", icon: Bot },
+  { id: "folders", label: "Allowed folders", icon: Folder },
   { id: "permissions", label: "Tool permissions", icon: Wrench },
   { id: "agent", label: "Local agent", icon: Cpu },
   { id: "privacy", label: "Privacy & execution", icon: Shield },
 ] as const;
+
+/** Permission rows the backend actually enforces today. */
+const ENFORCED_TOOLS = new Set(["fs.read", "fs.write"]);
 
 function UiOnly({ children = "UI only" }: { children?: ReactNode }) {
   return (
@@ -153,11 +159,12 @@ export function SettingsPage() {
 
           <AiModelSection />
 
+          <AllowedFoldersSection />
+
           <Section
             id="permissions"
             title="Tool permissions"
-            badge={<UiOnly />}
-            description="Choose what the assistant may do without asking. These will be enforced by the local executor once it exists."
+            description="Choose what the assistant may do without asking. “Read files” and “Create & modify files” are enforced by the backend; the other tools aren't built yet."
           >
             {s.permissions.map((p) => (
               <Field
@@ -168,6 +175,7 @@ export function SettingsPage() {
                   <span className="inline-flex items-center gap-1.5">
                     {p.description}
                     {p.risk === "high" && <Badge tone="danger">High risk</Badge>}
+                    {!ENFORCED_TOOLS.has(p.tool) && <UiOnly>Not built yet</UiOnly>}
                   </span>
                 }
               >
@@ -476,6 +484,72 @@ function AiModelSection() {
         onConfirm={() => void removeKey()}
         title="Remove API key?"
         description="Chat will switch back to demo mode until you add a key again."
+        confirmLabel="Remove"
+      />
+    </Section>
+  );
+}
+
+function AllowedFoldersSection() {
+  const { actions, ai, allowedDirs } = useStore();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
+
+  async function add() {
+    setBusy(true);
+    try {
+      if (await actions.addAllowedDir()) toast("Folder added", "success");
+    } catch (e) {
+      toast(toBackendError(e).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Section
+      id="folders"
+      title="Allowed folders"
+      description="The assistant's file tools can only see and change files inside these folders. Nothing outside them is reachable."
+    >
+      <div className="space-y-2 py-4">
+        {!ai?.available ? (
+          <p className="text-sm text-fg-muted">Available in the desktop app.</p>
+        ) : allowedDirs.length === 0 ? (
+          <p className="text-sm text-fg-muted">
+            No folders yet — file tools are turned off until you add one. Start with a dedicated folder rather than your
+            whole Documents folder.
+          </p>
+        ) : (
+          <ul className="space-y-1.5">
+            {allowedDirs.map((d) => (
+              <li key={d} className="flex items-center gap-2.5 rounded-lg border border-border bg-surface-2 px-3 py-2">
+                <Folder className="size-4 shrink-0 text-fg-subtle" />
+                <span className="min-w-0 flex-1 truncate font-mono text-xs" title={d}>
+                  {d}
+                </span>
+                <Button size="sm" variant="danger-ghost" onClick={() => setRemoving(d)}>
+                  Remove
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {ai?.available && (
+          <Button variant="outline" icon={<FolderPlus className="size-4" />} loading={busy} onClick={() => void add()}>
+            Add folder…
+          </Button>
+        )}
+      </div>
+      <ConfirmDialog
+        open={removing !== null}
+        onClose={() => setRemoving(null)}
+        onConfirm={() => {
+          if (removing) actions.removeAllowedDir(removing).catch((e) => toast(toBackendError(e).message, "error"));
+        }}
+        title="Remove folder?"
+        description={removing ? `The assistant will no longer be able to access ${removing}. Files are not deleted.` : undefined}
         confirmLabel="Remove"
       />
     </Section>

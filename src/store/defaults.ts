@@ -6,7 +6,7 @@ export const DEFAULT_PERMISSIONS: ToolPermission[] = [
   { tool: "fs.delete", label: "Delete files", description: "Remove files and folders", level: "ask", risk: "high" },
   { tool: "browser", label: "Browser actions", description: "Open pages, search and read freely. Ask = approve each click and typed entry. Form submits, password fields and downloads always ask.", level: "ask", risk: "medium" },
   { tool: "shell", label: "Terminal commands", description: "Run commands in PowerShell", level: "ask", risk: "high" },
-  { tool: "apps", label: "Desktop apps", description: "Launch and control applications", level: "deny", risk: "high" },
+  { tool: "apps", label: "Desktop apps", description: "Read and operate app windows. Launching, clicking and typing always ask. Admin windows and password fields are refused.", level: "deny", risk: "high" },
 ];
 
 
@@ -24,5 +24,6 @@ export const DEFAULT_SETTINGS: Settings = {
   storeHistoryLocally: true,
   requireApprovalForHighRisk: true,
   maxStepsPerTask: 20,
+  allowedApps: "",
   sandboxMode: true,
 };

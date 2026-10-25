@@ -153,6 +153,8 @@ export interface Settings {
   /** Empty string = the backend default (`OPENAI_MODEL` or the built-in fallback). */
   model: string;
   systemPrompt: string;
+  /** Apps the assistant may launch: one absolute .exe path per line. */
+  allowedApps: string;
   // Tool permissions (UI only)
   permissions: ToolPermission[];
   // Privacy & execution

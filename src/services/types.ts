@@ -19,9 +19,9 @@ export interface ChatRequest {
   conversationId: ID;
   /** Full ordered history including the new user message. */
   messages: Pick<Message, "role" | "content">[];
-  settings: Pick<Settings, "model" | "systemPrompt" | "maxStepsPerTask">;
+  settings: Pick<Settings, "model" | "systemPrompt" | "maxStepsPerTask" | "allowedApps">;
   /** File tool permissions, enforced by the backend. */
-  permissions: { read: PermissionLevel; write: PermissionLevel; browser: PermissionLevel };
+  permissions: { read: PermissionLevel; write: PermissionLevel; browser: PermissionLevel; apps: PermissionLevel };
 }
 
 export interface ToolFileChange {

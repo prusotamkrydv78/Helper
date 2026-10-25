@@ -38,7 +38,7 @@ const SECTIONS = [
 ] as const;
 
 /** Permission rows the backend actually enforces today. */
-const ENFORCED_TOOLS = new Set(["fs.read", "fs.write", "browser"]);
+const ENFORCED_TOOLS = new Set(["fs.read", "fs.write", "browser", "apps"]);
 
 function UiOnly({ children = "UI only" }: { children?: ReactNode }) {
   return (
@@ -165,7 +165,7 @@ export function SettingsPage() {
           <Section
             id="permissions"
             title="Tool permissions"
-            description="Choose what the assistant may do without asking. File and browser permissions are enforced by the backend; terminal and desktop-app tools aren't built."
+            description="Choose what the assistant may do without asking. File, browser and desktop-app permissions are enforced by the backend; terminal tools aren't built."
           >
             {s.permissions.map((p) => (
               <Field
@@ -200,6 +200,17 @@ export function SettingsPage() {
                 )}
               </Field>
             ))}
+            <Field label="Allowed apps" description="Apps the assistant may launch, one full .exe path per line. Leave empty to disable launching.">
+              {(id) => (
+                <Textarea
+                  id={id}
+                  rows={3}
+                  placeholder={"C:\Windows\System32\notepad.exe"}
+                  value={s.allowedApps}
+                  onChange={(e) => set({ allowedApps: e.target.value })}
+                />
+              )}
+            </Field>
           </Section>
 
           <Section id="agent" title="Local PC agent" description="The local executor carries out approved actions on this computer.">

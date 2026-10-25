@@ -25,6 +25,8 @@ pub enum ToolKind {
     Write,
     /// Drives the managed browser (stateful; runs one at a time).
     Browser,
+    /// Inspects or controls desktop app windows (Windows UI Automation).
+    Desktop,
 }
 
 pub struct ToolSpec {
@@ -172,6 +174,78 @@ pub const TOOLS: &[ToolSpec] = &[
             "additionalProperties": false
         }),
     },
+    ToolSpec {
+        name: "app_list_windows",
+        title: "List windows",
+        description: "List visible top-level desktop app windows with their handle, title and executable.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": {  },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "app_launch",
+        title: "Launch app",
+        description: "Start an app from the user's allowed-apps list (by full path or name without .exe). No arguments are passed. Needs the user's approval.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "app": { "type": "string", "description": "Allowed app path or name." } },
+            "required": ["app"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "app_focus",
+        title: "Focus window",
+        description: "Bring a window to the front.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "window": { "type": "integer", "description": "Window handle from app_list_windows." } },
+            "required": ["window"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "app_get_ui_tree",
+        title: "Read window",
+        description: "Get a window's named UI elements (buttons, fields, text). Each has a ref (e.g. e12) for app_click / app_type; refs expire when the window changes or another window is read.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "window": { "type": "integer", "description": "Window handle from app_list_windows." } },
+            "required": ["window"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "app_click",
+        title: "Click in app",
+        description: "Activate an element by ref (invoke, toggle, select or expand). Needs the user's approval.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "ref": { "type": "string", "description": "Element ref, e.g. e12." } },
+            "required": ["ref"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "app_type",
+        title: "Type in app",
+        description: "Replace the text of an editable field by ref. Password fields are refused. Needs the user's approval.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "ref": { "type": "string", "description": "Element ref, e.g. e12." }, "text": { "type": "string" } },
+            "required": ["ref", "text"],
+            "additionalProperties": false
+        }),
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static ToolSpec> {
@@ -238,7 +312,7 @@ impl ToolError {
     }
 }
 
-fn parse<T: serde::de::DeserializeOwned>(args: &Value) -> Result<T, ToolError> {
+pub(crate) fn parse<T: serde::de::DeserializeOwned>(args: &Value) -> Result<T, ToolError> {
     serde_json::from_value(args.clone()).map_err(|e| ToolError::invalid(format!("Invalid arguments: {e}")))
 }
 

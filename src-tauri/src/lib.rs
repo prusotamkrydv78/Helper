@@ -2,6 +2,7 @@ mod ai;
 mod browser;
 mod commands;
 mod config;
+mod desktop;
 mod error;
 mod state;
 mod tools;

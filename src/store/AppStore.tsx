@@ -356,11 +356,12 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         {
           conversationId,
           messages: history,
-          settings: { model: s.model, systemPrompt: s.systemPrompt, maxStepsPerTask: s.maxStepsPerTask },
+          settings: { model: s.model, systemPrompt: s.systemPrompt, maxStepsPerTask: s.maxStepsPerTask, allowedApps: s.allowedApps },
           permissions: {
             read: s.permissions.find((p) => p.tool === "fs.read")?.level ?? "allow",
             write: s.permissions.find((p) => p.tool === "fs.write")?.level ?? "ask",
             browser: s.permissions.find((p) => p.tool === "browser")?.level ?? "ask",
+            apps: s.permissions.find((p) => p.tool === "apps")?.level ?? "deny",
           },
         },
         (e) => {

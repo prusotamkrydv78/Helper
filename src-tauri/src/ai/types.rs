@@ -41,6 +41,9 @@ pub struct ChatRequest {
     pub permissions: ToolPermissions,
     /// Upper bound on tool-calling rounds for this request.
     pub max_tool_rounds: Option<u32>,
+    /// Absolute .exe paths the user allows `app_launch` to start.
+    #[serde(default)]
+    pub allowed_apps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -60,6 +63,13 @@ pub struct ToolPermissions {
     /// actions ask. Form submissions, sensitive fields and downloads always ask.
     #[serde(default = "default_browser")]
     pub browser: PermissionLevel,
+    /// Desktop app tools. Launching, clicking and typing always ask.
+    #[serde(default = "default_apps")]
+    pub apps: PermissionLevel,
+}
+
+fn default_apps() -> PermissionLevel {
+    PermissionLevel::Deny
 }
 
 fn default_browser() -> PermissionLevel {
@@ -68,7 +78,7 @@ fn default_browser() -> PermissionLevel {
 
 impl Default for ToolPermissions {
     fn default() -> Self {
-        Self { read: PermissionLevel::Allow, write: PermissionLevel::Ask, browser: PermissionLevel::Ask }
+        Self { read: PermissionLevel::Allow, write: PermissionLevel::Ask, browser: PermissionLevel::Ask, apps: PermissionLevel::Deny }
     }
 }
 

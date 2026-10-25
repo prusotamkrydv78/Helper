@@ -1,4 +1,5 @@
 mod ai;
+mod browser;
 mod commands;
 mod config;
 mod error;
@@ -23,7 +24,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
-            app.manage(state::AppState::new(&config_dir));
+            let state = state::AppState::new(&config_dir);
+            // Close the browser session after a period of inactivity.
+            let browser = std::sync::Arc::clone(&state.browser);
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    browser.shutdown_if_idle().await;
+                }
+            });
+            app.manage(state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

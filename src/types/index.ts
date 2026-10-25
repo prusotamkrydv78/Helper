@@ -75,6 +75,8 @@ export interface TaskStep {
   result?: ToolResult;
   error?: string;
   requiresApproval: boolean;
+  /** Why approval is needed (e.g. "Submits a form to …"), from the backend. */
+  approvalReason?: string;
   risk: RiskLevel;
   startedAt?: ISODate;
   finishedAt?: ISODate;

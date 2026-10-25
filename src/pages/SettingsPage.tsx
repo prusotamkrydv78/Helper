@@ -20,6 +20,7 @@ import {
 import type { PermissionLevel, Settings } from "../types";
 import { cn, formatRelative } from "../lib/utils";
 import { useStore } from "../store/AppStore";
+import { DEFAULT_PERMISSIONS } from "../store/defaults";
 import { toBackendError } from "../services/tauri/tauriAi";
 import { Page, PageHeader } from "../components/layout/Page";
 import { Button, Spinner } from "../components/ui/Button";
@@ -37,7 +38,7 @@ const SECTIONS = [
 ] as const;
 
 /** Permission rows the backend actually enforces today. */
-const ENFORCED_TOOLS = new Set(["fs.read", "fs.write"]);
+const ENFORCED_TOOLS = new Set(["fs.read", "fs.write", "browser"]);
 
 function UiOnly({ children = "UI only" }: { children?: ReactNode }) {
   return (
@@ -164,7 +165,7 @@ export function SettingsPage() {
           <Section
             id="permissions"
             title="Tool permissions"
-            description="Choose what the assistant may do without asking. “Read files” and “Create & modify files” are enforced by the backend; the other tools aren't built yet."
+            description="Choose what the assistant may do without asking. File and browser permissions are enforced by the backend; terminal and desktop-app tools aren't built."
           >
             {s.permissions.map((p) => (
               <Field
@@ -173,7 +174,7 @@ export function SettingsPage() {
                 label={p.label}
                 description={
                   <span className="inline-flex items-center gap-1.5">
-                    {p.description}
+                    {DEFAULT_PERMISSIONS.find((d) => d.tool === p.tool)?.description ?? p.description}
                     {p.risk === "high" && <Badge tone="danger">High risk</Badge>}
                     {!ENFORCED_TOOLS.has(p.tool) && <UiOnly>Not built yet</UiOnly>}
                   </span>

@@ -132,7 +132,7 @@ export function ApprovalPrompt({ task, step }: { task: Task; step: TaskStep }) {
             {task.isDemo ? (
               <Badge tone="neutral">Demo — nothing will run</Badge>
             ) : (
-              <Badge tone="warning">Changes files on your PC</Badge>
+              <Badge tone="warning">{step.tool.startsWith("browser_") ? "Acts on a real website" : "Changes files on your PC"}</Badge>
             )}
           </div>
           {task.isDemo ? (
@@ -142,8 +142,15 @@ export function ApprovalPrompt({ task, step }: { task: Task; step: TaskStep }) {
             </p>
           ) : (
             <p className="mt-1 text-sm text-fg-muted">
-              The assistant wants to run <span className="font-medium text-fg">{step.title}</span> on{" "}
-              <code className="break-all font-mono text-fg">{step.description}</code>. Review the input below before approving.
+              {step.approvalReason ? (
+                <span className="font-medium text-fg">{step.approvalReason}.</span>
+              ) : (
+                <>
+                  The assistant wants to run <span className="font-medium text-fg">{step.title}</span> on{" "}
+                  <code className="break-all font-mono text-fg">{step.description}</code>.
+                </>
+              )}{" "}
+              Review the input below before approving.
             </p>
           )}
           <div className="mt-3 flex flex-wrap gap-2">

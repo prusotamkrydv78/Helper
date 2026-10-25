@@ -56,11 +56,19 @@ pub enum PermissionLevel {
 pub struct ToolPermissions {
     pub read: PermissionLevel,
     pub write: PermissionLevel,
+    /// Browser tools. `ask`: approve clicks and typing; `allow`: only sensitive
+    /// actions ask. Form submissions, sensitive fields and downloads always ask.
+    #[serde(default = "default_browser")]
+    pub browser: PermissionLevel,
+}
+
+fn default_browser() -> PermissionLevel {
+    PermissionLevel::Ask
 }
 
 impl Default for ToolPermissions {
     fn default() -> Self {
-        Self { read: PermissionLevel::Allow, write: PermissionLevel::Ask }
+        Self { read: PermissionLevel::Allow, write: PermissionLevel::Ask, browser: PermissionLevel::Ask }
     }
 }
 

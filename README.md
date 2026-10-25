@@ -5,7 +5,8 @@ A desktop AI assistant built with Tauri 2, Rust, React 19, TypeScript and Vite.
 **Current status:** chat is live through OpenAI when an API key is configured.
 The assistant can use four real file tools (list, read, create folder, write
 file), but only inside folders you explicitly allow. Automations and the local
-PC agent are still simulated. There are no shell, delete or code-execution tools.
+PC agent are still simulated. The assistant can also browse the web in a managed browser.
+There are no shell, delete or code-execution tools.
 
 ## Prerequisites (Windows)
 
@@ -75,11 +76,50 @@ Each tool call is logged with its request and call IDs, for example `running rea
 
 **OpenAI note:** some reasoning models (e.g. `gpt-6-luna`) reject function tools on Chat Completions unless reasoning is off. The app detects that specific error, retries with `reasoning_effort: "none"`, and remembers it for that model. Set `OPENAI_REASONING_EFFORT` to override.
 
+## Browser tools
+
+The assistant can browse the web through a managed Microsoft Edge session driven by
+[Playwright](https://playwright.dev). It runs in a separate Node worker
+(`browser-worker/worker.mjs`) that the Rust backend starts on first use.
+
+| Tool | What it does | Approval |
+| --- | --- | --- |
+| `browser_open` | Opens a public http(s) URL | none |
+| `browser_get_page_content` | Readable text, links, and interactive elements with refs (`e12`) | none |
+| `browser_search` | Web search (DuckDuckGo by default), returns titles/URLs/snippets | none |
+| `browser_click` | Clicks an element by ref | “Browser actions” = Ask → every click asks. **Form submissions always ask.** |
+| `browser_type` | Fills a text field by ref (optionally presses Enter) | Ask → every entry asks. **Password/payment fields and Enter-to-submit always ask.** |
+| `browser_download` | Saves a file into an allowed folder (max 50 MB, never overwrites) | Follows “Create & modify files” (default: ask) |
+
+**Setup:** you need Node.js 20+, `npm install` (installs `playwright-core`) and Microsoft
+Edge, which comes with Windows 11. No separate browser download is needed. The browser window is
+visible by default, so you can watch what the assistant does; search engines also block
+hidden (headless) browsers.
+
+Environment options: `AA_BROWSER_HEADLESS=1` hides the window, `AA_BROWSER_CHANNEL`
+picks the browser (`msedge`, `chrome` or `chromium`), `AA_SEARCH_URL` changes the search engine (Bing
+markup is supported too), `AA_NODE_PATH` sets the Node binary, and `AA_BROWSER_WORKER` sets the worker script location.
+
+**Safety (enforced in code, not just in the prompt):**
+- **Destinations:** only `http`/`https`. The Rust backend checks each URL before the browser loads it: `localhost`, `.local`/`.internal` names, single-label hosts, private/loopback/link-local/CGNAT/metadata IPs, and hosts that *resolve* to such addresses are all refused. Inside the browser, **every** request (navigations, every redirect hop, images, scripts, `fetch`, WebSockets) is checked against the same rules, so a public page can't reach your local network.
+- **Approvals** come from inspecting the real element, not from the model's description. For example, clicking a button that submits a form asks “Submits a form (“Send”) to https://…”.
+- **File uploads** aren't supported. Downloads go only into allowed folders, file names are sanitized, and the saved path is checked again afterwards.
+- **Untrusted content:** page text, links and search results reach the model labeled as untrusted data, and the system prompt tells it never to follow instructions found on pages.
+- **Session lifecycle:** one session; per-action timeouts (25–120 s). **Stop**, or a timeout, closes the browser session (the next call starts a fresh one). The session also closes after 5 idle minutes and when the app exits.
+
+**Tested live** (through the app with a real model): searching the public web, opening a real page and reading it;
+filling and submitting a form on a controlled test page, with the approval prompt; and a
+prompt-injection page, whose planted instructions were ignored. Downloads, the address
+blocking and redirects are covered by the automated tests against local pages. A live
+download from a public site hasn't been tested.
+
 ## Checks
 
 ```bash
 npm run build                          # TypeScript type-check + production frontend build
 cd src-tauri && cargo test             # Rust unit tests (SSE, history, errors, path guard, file tools)
+npm run test:browser                   # browser worker vs controlled local pages (real Edge)
+cd src-tauri && cargo test -- --ignored  # Rust → worker → browser end-to-end test
 cd src-tauri && cargo clippy           # optional lint
 ```
 
@@ -102,6 +142,8 @@ src-tauri/src/
   ai/agent.rs              Tool-calling loop (round → tools → results → round)
   ai/openai.rs             OpenAI Chat Completions streaming client, tool-call assembly, retries
   tools/                   Tool registry, path guard, file tools, allowed folders
+  browser/                 Browser tools, URL policy, approval rules, worker lifecycle
+browser-worker/            Playwright worker (Node) + network policy + tests
   ai/sse.rs                Incremental Server-Sent Events parser
   ai/history.rs            Conversation normalization (ordering, roles, size limit)
   ai/types.rs              Request/stream event types shared with the frontend

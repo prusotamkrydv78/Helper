@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::openai::OpenAiClient;
+use crate::browser::worker::BrowserWorker;
 use crate::tools::allowed_dirs::AllowedDirs;
 
 pub struct AppState {
     pub ai: OpenAiClient,
     pub allowed_dirs: AllowedDirs,
+    /// Managed browser session (Playwright worker), started on first use.
+    pub browser: Arc<BrowserWorker>,
     /// In-flight chat requests by request id, so they can be cancelled.
     inflight: Mutex<HashMap<String, CancellationToken>>,
     /// Tool calls waiting for the user, keyed by "request_id:call_id".
@@ -26,6 +29,7 @@ impl AppState {
         Self {
             ai: OpenAiClient::new(),
             allowed_dirs: AllowedDirs::load(config_dir),
+            browser: Arc::new(BrowserWorker::new()),
             inflight: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
         }

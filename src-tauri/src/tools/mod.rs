@@ -5,6 +5,7 @@ pub mod allowed_dirs;
 pub mod fs;
 pub mod paths;
 
+use std::borrow::Cow;
 use std::path::Path;
 use std::time::Duration;
 
@@ -22,6 +23,8 @@ pub enum ToolKind {
     Read,
     /// Creates or changes files.
     Write,
+    /// Drives the managed browser (stateful; runs one at a time).
+    Browser,
 }
 
 pub struct ToolSpec {
@@ -89,6 +92,86 @@ pub const TOOLS: &[ToolSpec] = &[
             "additionalProperties": false
         }),
     },
+    ToolSpec {
+        name: "browser_open",
+        title: "Open page",
+        description: "Open a public http(s) URL in the managed browser. Returns the final URL, title and HTTP status. Local network and internal addresses are blocked.",
+        kind: ToolKind::Browser,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "url": { "type": "string", "description": "Absolute http(s) URL." } },
+            "required": ["url"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "browser_get_page_content",
+        title: "Read page",
+        description: "Get the current page's readable text, links, and interactive elements. Each element has a ref (e.g. e12) for browser_click / browser_type; refs expire when the page changes.",
+        kind: ToolKind::Browser,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "max_chars": { "type": "integer", "description": "Text limit, 500–12000 (default 12000)." } },
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "browser_click",
+        title: "Click",
+        description: "Click an element by its ref from browser_get_page_content. Clicks that submit a form need the user's approval.",
+        kind: ToolKind::Browser,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "ref": { "type": "string", "description": "Element ref, e.g. e12." } },
+            "required": ["ref"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "browser_type",
+        title: "Type",
+        description: "Replace the text in an input or textarea (by ref). Set submit to press Enter afterwards; submitting needs the user's approval.",
+        kind: ToolKind::Browser,
+        parameters: || json!({
+            "type": "object",
+            "properties": {
+                "ref": { "type": "string", "description": "Element ref of a text field." },
+                "text": { "type": "string" },
+                "submit": { "type": "boolean", "description": "Press Enter after typing." }
+            },
+            "required": ["ref", "text"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "browser_search",
+        title: "Web search",
+        description: "Search the web and return result titles, URLs and snippets.",
+        kind: ToolKind::Browser,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "browser_download",
+        title: "Download file",
+        description: "Download a file (by URL, or by clicking an element ref) into a permitted folder. Existing files are never overwritten. Max 50 MB. Needs the user's approval.",
+        kind: ToolKind::Browser,
+        parameters: || json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "File URL (use this or ref)." },
+                "ref": { "type": "string", "description": "Element ref that starts the download (use this or url)." },
+                "directory": { "type": "string", "description": "Permitted folder to save into." },
+                "filename": { "type": "string", "description": "Optional file name." }
+            },
+            "required": ["directory"],
+            "additionalProperties": false
+        }),
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static ToolSpec> {
@@ -116,6 +199,7 @@ pub struct FileChange {
 }
 
 /// A successful tool result: `content` goes to the model, `summary` to the UI.
+#[derive(Debug)]
 pub struct ToolOutput {
     pub content: Value,
     pub summary: String,
@@ -124,25 +208,28 @@ pub struct ToolOutput {
 
 #[derive(Debug, Clone)]
 pub struct ToolError {
-    pub code: &'static str,
+    pub code: Cow<'static, str>,
     pub message: String,
 }
 
 impl ToolError {
+    pub fn new(code: impl Into<Cow<'static, str>>, message: impl Into<String>) -> Self {
+        Self { code: code.into(), message: message.into() }
+    }
     pub fn invalid(m: impl Into<String>) -> Self {
-        Self { code: "invalid_arguments", message: m.into() }
+        Self::new("invalid_arguments", m.into())
     }
     pub fn denied(m: impl Into<String>) -> Self {
-        Self { code: "permission_denied", message: m.into() }
+        Self::new("permission_denied", m.into())
     }
     pub fn not_found(m: impl Into<String>) -> Self {
-        Self { code: "not_found", message: m.into() }
+        Self::new("not_found", m.into())
     }
     pub fn io(path: &Path, e: &std::io::Error) -> Self {
-        Self { code: "io_error", message: format!("{}: {e}", paths::display(path)) }
+        Self::new("io_error", format!("{}: {e}", paths::display(path)))
     }
     pub fn timeout() -> Self {
-        Self { code: "timeout", message: format!("The tool did not finish within {}s.", TOOL_TIMEOUT.as_secs()) }
+        Self::new("timeout", format!("The tool did not finish within {}s.", TOOL_TIMEOUT.as_secs()))
     }
 
     /// The error as it is reported back to the model.

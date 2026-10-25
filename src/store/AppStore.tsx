@@ -52,9 +52,16 @@ const isLive = (ai: AiStatus | null): boolean => Boolean(ai?.available && ai.con
 function describeToolArgs(args: unknown): string {
   if (!args || typeof args !== "object") return "Invalid arguments";
   const a = args as Record<string, unknown>;
-  const path = typeof a.path === "string" ? shortPath(a.path) : "";
-  const extras = [a.recursive === true && "recursive", a.overwrite === true && "overwrite"].filter(Boolean);
-  return [path || "(no path)", ...extras].join(" · ");
+  const str = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : "");
+  if (str("query")) return `“${str("query")}”`;
+  if (str("url") && !str("directory")) return str("url");
+  if (str("ref") && !str("directory")) {
+    const text = str("text");
+    return text ? `${str("ref")} ← “${text.slice(0, 40)}”${a.submit === true ? " · submit" : ""}` : `element ${str("ref")}`;
+  }
+  const path = str("path") || str("directory");
+  const extras = [a.recursive === true && "recursive", a.overwrite === true && "overwrite", str("url") && "from URL"].filter(Boolean);
+  return [path ? shortPath(path) : "(no path)", ...extras].join(" · ");
 }
 
 /** Keeps the meaningful end of long paths: "…\workspace\summary\todo.md". */
@@ -322,7 +329,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       const task: Task = {
         id: uid("task"),
         conversationId,
-        title: "File tools",
+        title: "Tool activity",
         summary: titleFromPrompt(lastUser),
         status: "running",
         steps: [],
@@ -353,6 +360,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
           permissions: {
             read: s.permissions.find((p) => p.tool === "fs.read")?.level ?? "allow",
             write: s.permissions.find((p) => p.tool === "fs.write")?.level ?? "ask",
+            browser: s.permissions.find((p) => p.tool === "browser")?.level ?? "ask",
           },
         },
         (e) => {
@@ -396,6 +404,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
                   ...(terminal ? { finishedAt: nowISO() } : {}),
                   ...(e.output ? { result: { output: e.output, format: "json" as const } } : {}),
                   ...(e.error ? { error: e.error } : {}),
+                  ...(e.status === "awaiting_approval" && e.summary ? { approvalReason: e.summary } : {}),
                 },
               });
               if (e.file) dispatch({ type: "file_change", taskId: liveTaskId, file: { ...e.file, simulated: false } });

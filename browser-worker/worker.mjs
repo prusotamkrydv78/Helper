@@ -26,6 +26,8 @@ const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
 const SEARCH_URL = process.env.AA_SEARCH_URL || "https://html.duckduckgo.com/html/?q=";
 
 const policy = createPolicy({ allowHosts: (process.env.AA_BROWSER_TEST_ALLOW_HOSTS || "").split(",") });
+// Requests are fetched by this process (route.fetch); re-check addresses when it connects.
+policy.guardDnsLookup();
 const log = (...a) => process.stderr.write(`[browser-worker] ${a.join(" ")}\n`);
 
 class ToolError extends Error {
@@ -44,7 +46,12 @@ async function launch() {
   const channel = process.env.AA_BROWSER_CHANNEL || "msedge";
   const headless = process.env.AA_BROWSER_HEADLESS === "1";
   try {
-    return await chromium.launch({ channel: channel === "chromium" ? undefined : channel, headless });
+    return await chromium.launch({
+      channel: channel === "chromium" ? undefined : channel,
+      headless,
+      // WebRTC traffic doesn't pass the request router; keep it off local addresses.
+      args: ["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
+    });
   } catch (e) {
     throw new ToolError(
       "browser_unavailable",
@@ -56,7 +63,8 @@ async function launch() {
 async function ensurePage() {
   if (page && !page.isClosed()) return page;
   browser ??= await launch();
-  context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1280, height: 900 } });
+  // Service workers could fetch outside the request router, so they're blocked.
+  context = await browser.newContext({ acceptDownloads: true, serviceWorkers: "block", viewport: { width: 1280, height: 900 } });
   context.setDefaultTimeout(ACTION_TIMEOUT);
   context.setDefaultNavigationTimeout(NAV_TIMEOUT);
   // Every HTTP(S) request — navigations, scripts, fetch/XHR — passes the policy.

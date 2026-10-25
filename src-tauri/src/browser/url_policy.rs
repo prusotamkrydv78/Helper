@@ -16,16 +16,24 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_public_v4(v4),
         IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
+            // IPv4-mapped and IPv4-compatible forms (also :: and ::1) follow the v4 rules.
+            if let Some(v4) = v6.to_ipv4() {
                 return is_public_v4(v4);
             }
             let s = v6.segments();
+            if s[0] == 0x2002 {
+                // 6to4 embeds a v4 address.
+                let [a, b] = s[1].to_be_bytes();
+                let [c, d] = s[2].to_be_bytes();
+                return is_public_v4(Ipv4Addr::new(a, b, c, d));
+            }
             !(v6.is_unspecified()
                 || v6.is_loopback()
                 || (s[0] & 0xfe00) == 0xfc00 // unique local
                 || (s[0] & 0xffc0) == 0xfe80 // link local
                 || (s[0] & 0xff00) == 0xff00 // multicast
                 || (s[0] == 0x64 && s[1] == 0xff9b) // NAT64
+                || (s[0] == 0x2001 && s[1] == 0) // Teredo
                 || (s[0] == 0x2001 && s[1] == 0x0db8)) // documentation
         }
     }
@@ -135,7 +143,7 @@ mod tests {
         for ip in ["127.0.0.1", "10.0.0.1", "172.16.5.4", "192.168.0.1", "169.254.169.254", "100.64.1.1", "0.0.0.0", "224.0.0.1"] {
             assert!(!is_public_ip(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1", "::"] {
+        for ip in ["::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1", "::", "::ffff:7f00:1", "::7f00:1", "2002:c0a8:101::1", "2001:0:4136:e378::1"] {
             assert!(!is_public_ip(ip.parse::<Ipv6Addr>().unwrap().into()), "{ip}");
         }
         for ip in ["8.8.8.8", "1.1.1.1", "93.184.216.34"] {

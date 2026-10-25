@@ -1,6 +1,6 @@
 //! Windows desktop app automation through UI Automation.
 //!
-//! The model sees windows by handle and elements by ref (`e12`) from the last
+//! The model sees windows by handle and elements by ref (`e3_12`) from the last
 //! `app_get_ui_tree`. Actions go through UIA patterns (Invoke, Toggle, Value…),
 //! never synthetic mouse/keyboard input. This app's own windows, elevated
 //! processes, credential/UAC prompts and password fields are refused.
@@ -117,6 +117,7 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
     use serde_json::{json, Value};
@@ -142,11 +143,14 @@ mod imp {
     const BLOCKED_EXES: &[&str] = &["consent.exe", "credentialuibroker.exe", "logonui.exe", "lockapp.exe"];
 
     /// Elements behind the refs from the last `app_get_ui_tree`: (index in FindAll, name, control type).
+    /// Refs are `e{generation}_{n}`, so refs from an earlier read can't select elements of a newer one.
     struct Snapshot {
+        generation: u64,
         hwnd: isize,
         elems: Vec<(usize, String, i32)>,
     }
     static SNAPSHOT: Mutex<Option<Snapshot>> = Mutex::new(None);
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
 
     fn err(e: windows::core::Error) -> ToolError {
         ToolError::new("desktop_error", format!("{e}"))
@@ -290,12 +294,15 @@ mod imp {
         let (hwnd, idx, want_name, want_type) = {
             let g = SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner());
             let s = g.as_ref().ok_or_else(|| ToolError::invalid("No element refs yet. Call app_get_ui_tree first."))?;
-            let n = r
+            let (generation, n) = r
                 .trim()
                 .strip_prefix('e')
-                .and_then(|x| x.parse::<usize>().ok())
-                .filter(|n| (1..=s.elems.len()).contains(n))
+                .and_then(|x| x.split_once('_'))
+                .and_then(|(g, n)| Some((g.parse::<u64>().ok()?, n.parse::<usize>().ok()?)))
                 .ok_or_else(|| ToolError::invalid(format!("Unknown ref `{r}`. Call app_get_ui_tree again.")))?;
+            if generation != s.generation || !(1..=s.elems.len()).contains(&n) {
+                return Err(ToolError::new("stale_ref", "That ref is from an earlier read. Use refs from the latest app_get_ui_tree."));
+            }
             let (i, name, t) = s.elems[n - 1].clone();
             (s.hwnd, i, name, t)
         };
@@ -370,6 +377,7 @@ mod imp {
                 let els = all_elements(&uia()?, w.hwnd)?;
                 let (mut out, mut snap) = (Vec::new(), Vec::new());
                 let mut truncated = false;
+                let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
                 for (i, e) in els.iter().enumerate() {
                     if flag(unsafe { e.CurrentIsOffscreen() }) {
                         continue;
@@ -383,7 +391,7 @@ mod imp {
                         truncated = true;
                         break;
                     }
-                    let mut item = json!({ "ref": format!("e{}", out.len() + 1), "type": kind(e), "name": clip(&n, 120) });
+                    let mut item = json!({ "ref": format!("e{generation}_{}", out.len() + 1), "type": kind(e), "name": clip(&n, 120) });
                     if is_password(e) {
                         item["password"] = json!(true);
                     } else if editable {
@@ -397,7 +405,7 @@ mod imp {
                     snap.push((i, n, t));
                     out.push(item);
                 }
-                *SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner()) = Some(Snapshot { hwnd: w.hwnd.0 as isize, elems: snap });
+                *SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner()) = Some(Snapshot { generation, hwnd: w.hwnd.0 as isize, elems: snap });
                 Ok(ToolOutput {
                     summary: format!("{} elements in “{}”", out.len(), clip(&w.title, 80)),
                     content: json!({

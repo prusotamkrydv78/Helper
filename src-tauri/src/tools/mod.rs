@@ -213,7 +213,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "app_get_ui_tree",
         title: "Read window",
-        description: "Get a window's named UI elements (buttons, fields, text). Each has a ref (e.g. e12) for app_click / app_type; refs expire when the window changes or another window is read.",
+        description: "Get a window's named UI elements (buttons, fields, text). Each has a ref (e.g. e3_12) for app_click / app_type; only refs from the latest read are valid.",
         kind: ToolKind::Desktop,
         parameters: || json!({
             "type": "object",
@@ -229,7 +229,7 @@ pub const TOOLS: &[ToolSpec] = &[
         kind: ToolKind::Desktop,
         parameters: || json!({
             "type": "object",
-            "properties": { "ref": { "type": "string", "description": "Element ref, e.g. e12." } },
+            "properties": { "ref": { "type": "string", "description": "Element ref from app_get_ui_tree, e.g. e3_12." } },
             "required": ["ref"],
             "additionalProperties": false
         }),
@@ -241,7 +241,7 @@ pub const TOOLS: &[ToolSpec] = &[
         kind: ToolKind::Desktop,
         parameters: || json!({
             "type": "object",
-            "properties": { "ref": { "type": "string", "description": "Element ref, e.g. e12." }, "text": { "type": "string" } },
+            "properties": { "ref": { "type": "string", "description": "Element ref from app_get_ui_tree, e.g. e3_12." }, "text": { "type": "string" } },
             "required": ["ref", "text"],
             "additionalProperties": false
         }),

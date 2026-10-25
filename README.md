@@ -5,7 +5,8 @@ A desktop AI assistant built with Tauri 2, Rust, React 19, TypeScript and Vite.
 **Current status:** chat is live through OpenAI when an API key is configured.
 The assistant can use four real file tools (list, read, create folder, write
 file), but only inside folders you explicitly allow. Automations and the local
-PC agent are still simulated. The assistant can also browse the web in a managed browser.
+PC agent are still simulated. The assistant can also browse the web in a managed browser
+and, on Windows, operate desktop app windows (off by default).
 There are no shell, delete or code-execution tools.
 
 ## Prerequisites (Windows)
@@ -101,7 +102,9 @@ picks the browser (`msedge`, `chrome` or `chromium`), `AA_SEARCH_URL` changes th
 markup is supported too), `AA_NODE_PATH` sets the Node binary, and `AA_BROWSER_WORKER` sets the worker script location.
 
 **Safety (enforced in code, not just in the prompt):**
-- **Destinations:** only `http`/`https`. The Rust backend checks each URL before the browser loads it: `localhost`, `.local`/`.internal` names, single-label hosts, private/loopback/link-local/CGNAT/metadata IPs, and hosts that *resolve* to such addresses are all refused. Inside the browser, **every** request (navigations, every redirect hop, images, scripts, `fetch`, WebSockets) is checked against the same rules, so a public page can't reach your local network.
+- **Destinations:** only `http`/`https`. IPv6 forms that embed an IPv4 address (`::ffff:7f00:1`, `::127.0.0.1`, 6to4, Teredo) are treated by the embedded address. The Rust backend checks each URL before the browser loads it: `localhost`, `.local`/`.internal` names, single-label hosts, private/loopback/link-local/CGNAT/metadata IPs, and hosts that *resolve* to such addresses are all refused. Inside the browser, **every** request (navigations, every redirect hop, images, scripts, `fetch`, WebSockets) is checked against the same rules, so a public page can't reach your local network. Requests are fetched by the worker
+  process, and its DNS lookups are filtered again at connect time, so a host can't pass the check and then
+  re-resolve to a private address (DNS rebinding). Service workers are blocked and WebRTC is kept off local addresses.
 - **Approvals** come from inspecting the real element, not from the model's description. For example, clicking a button that submits a form asks “Submits a form (“Send”) to https://…”.
 - **File uploads** aren't supported. Downloads go only into allowed folders, file names are sanitized, and the saved path is checked again afterwards.
 - **Untrusted content:** page text, links and search results reach the model labeled as untrusted data, and the system prompt tells it never to follow instructions found on pages.
@@ -112,6 +115,39 @@ filling and submitting a form on a controlled test page, with the approval promp
 prompt-injection page, whose planted instructions were ignored. Downloads, the address
 blocking and redirects are covered by the automated tests against local pages. A live
 download from a public site hasn't been tested.
+
+## Desktop app tools (Windows)
+
+The assistant can read and operate other apps' windows through Windows UI Automation
+(`src-tauri/src/desktop/`). It uses accessibility patterns (Invoke, Toggle, Select, Expand, Value),
+never synthetic mouse or keyboard input or screenshots.
+
+| Tool | What it does | Approval |
+| --- | --- | --- |
+| `app_list_windows` | Visible top-level windows: handle, title, executable | none |
+| `app_get_ui_tree` | A window's named elements (max 300), each with a ref like `e3_12` | none |
+| `app_focus` | Brings a window to the front | when “Desktop apps” = Ask |
+| `app_launch` | Starts an app from Settings → Allowed apps, without arguments or a shell | always |
+| `app_click` | Invokes/toggles/selects/expands an element by ref | always |
+| `app_type` | Sets the text of an editable field by ref (max 10,000 characters) | always |
+
+**Setup:** set Settings → Tool permissions → “Desktop apps” to Ask or Allow (default: Deny, which hides
+the tools). To allow launching, list full `.exe` paths, one per line, under “Allowed apps”;
+`app_launch` accepts a listed path or its file name without `.exe`, and is hidden while the list is empty.
+
+**Safety (enforced in Rust):**
+- Refused: this app's own windows, elevated (administrator) processes, processes that can't be inspected,
+  and UAC, credential and lock-screen UI (`consent.exe`, `CredentialUIBroker.exe`, `LogonUI.exe`, `LockApp.exe`).
+- Password fields can't be clicked or typed into.
+- Only refs from the latest `app_get_ui_tree` work. Before acting, the element is looked up again and its name
+  and type must still match, otherwise the call fails with `stale_ref`.
+- Approval prompts describe the real element, e.g. *Click button “Save” in “Untitled - Notepad”*.
+- Window and element text reaches the model labeled as untrusted.
+
+**Known limits:** apps that don't expose UI Automation (many custom-drawn apps and games) can't be operated.
+Windows may refuse to bring a window to the front. Each call has the 30-second timeout and Stop works, but a call
+stuck inside a hung app keeps its background thread until the app responds (later calls use other threads).
+Only one window's refs are kept at a time, shared across chats. Not yet covered by automated tests.
 
 ## Checks
 
@@ -143,6 +179,7 @@ src-tauri/src/
   ai/openai.rs             OpenAI Chat Completions streaming client, tool-call assembly, retries
   tools/                   Tool registry, path guard, file tools, allowed folders
   browser/                 Browser tools, URL policy, approval rules, worker lifecycle
+  desktop/                 Windows desktop app tools (UI Automation), safety rules, approvals
 browser-worker/            Playwright worker (Node) + network policy + tests
   ai/sse.rs                Incremental Server-Sent Events parser
   ai/history.rs            Conversation normalization (ordering, roles, size limit)

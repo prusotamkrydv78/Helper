@@ -38,7 +38,8 @@ function hit(req, res) {
 }
 
 test("policy classifies addresses", async () => {
-  for (const ip of ["127.0.0.1", "10.1.2.3", "172.20.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1"])
+  for (const ip of ["127.0.0.1", "10.1.2.3", "172.20.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1",
+    "::ffff:7f00:1", "::ffff:a9fe:a9fe", "::7f00:1", "::127.0.0.1", "2002:c0a8:101::1", "2001:0:4136:e378::1", "[::ffff:127.0.0.1]"])
     assert.equal(isPublicIp(ip), false, ip);
   for (const ip of ["8.8.8.8", "93.184.216.34", "2606:4700::1111"]) assert.equal(isPublicIp(ip), true, ip);
   const p = createPolicy();

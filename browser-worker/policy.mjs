@@ -2,6 +2,7 @@
 // browser makes (navigations, redirects, subresources, websockets) is checked
 // here. Mirrors src-tauri/src/browser/url_policy.rs.
 
+import dnsCallback from "node:dns";
 import dns from "node:dns/promises";
 import net from "node:net";
 
@@ -24,19 +25,40 @@ export function isPublicIp(ip) {
     return !V4_BLOCKED.some(([base, mask]) => ((n & mask) >>> 0) === base);
   }
   if (net.isIPv6(ip)) {
-    const lower = ip.toLowerCase();
-    const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return isPublicIp(mapped[1]);
-    if (lower === "::" || lower === "::1") return false;
-    const first = parseInt(lower.split(":")[0] || "0", 16);
-    if ((first & 0xfe00) === 0xfc00) return false; // fc00::/7 unique local
-    if ((first & 0xffc0) === 0xfe80) return false; // fe80::/10 link local
-    if ((first & 0xff00) === 0xff00) return false; // multicast
-    if (lower.startsWith("64:ff9b:")) return false; // NAT64 can reach v4 private space
-    if (lower.startsWith("2001:db8:")) return false; // documentation
+    const s = v6Segments(ip);
+    if (!s) return false;
+    const v4 = (hi, lo) => `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+    const zero5 = s.slice(0, 5).every((x) => x === 0);
+    // IPv4-mapped (::ffff:a.b.c.d, which URL parsing rewrites to ::ffff:7f00:1) and
+    // IPv4-compatible (::a.b.c.d) addresses carry the v4 rules; this also covers :: and ::1.
+    if (zero5 && (s[5] === 0xffff || s[5] === 0)) return isPublicIp(v4(s[6], s[7]));
+    if (s[0] === 0x2002) return isPublicIp(v4(s[1], s[2])); // 6to4 embeds a v4 address
+    if (s[0] === 0x2001 && s[1] === 0) return false; // Teredo
+    if ((s[0] & 0xfe00) === 0xfc00) return false; // fc00::/7 unique local
+    if ((s[0] & 0xffc0) === 0xfe80) return false; // fe80::/10 link local
+    if ((s[0] & 0xff00) === 0xff00) return false; // multicast
+    if (s[0] === 0x64 && s[1] === 0xff9b) return false; // NAT64 can reach v4 private space
+    if (s[0] === 0x2001 && s[1] === 0x0db8) return false; // documentation
     return true;
   }
   return false;
+}
+
+/** The eight 16-bit groups of an IPv6 address (zone id and embedded dotted v4 handled). */
+function v6Segments(ip) {
+  let s = ip.toLowerCase().replace(/^\[|\]$/g, "").split("%")[0];
+  const dotted = s.match(/(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) {
+    const n = v4ToInt(dotted[1]);
+    s = s.slice(0, -dotted[1].length) + `${(n >>> 16).toString(16)}:${(n & 0xffff).toString(16)}`;
+  }
+  const [head, tail] = s.split("::");
+  const h = head ? head.split(":") : [];
+  const t = tail ? tail.split(":") : [];
+  const groups = s.includes("::") ? [...h, ...Array(8 - h.length - t.length).fill("0"), ...t] : h;
+  if (groups.length !== 8) return null;
+  const out = groups.map((g) => parseInt(g, 16));
+  return out.some((g) => !(g >= 0 && g <= 0xffff)) ? null : out;
 }
 
 /**
@@ -86,5 +108,36 @@ export function createPolicy({ allowHosts = [] } = {}) {
     return result;
   }
 
-  return { check };
+  /** True when `host` (any port) is on the test allow-list. */
+  function hostAllowed(host) {
+    const h = String(host).replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+    return [...allow].some((a) => a.slice(0, a.lastIndexOf(":")) === h);
+  }
+
+  /**
+   * Enforces the address rules at connect time: replaces dns.lookup for this
+   * process so a host can't pass the check with a public address and then
+   * resolve to a private one when Playwright fetches it (DNS rebinding).
+   */
+  function guardDnsLookup() {
+    const original = dnsCallback.lookup;
+    const guarded = function (hostname, options, callback) {
+      if (typeof options === "function") [callback, options] = [options, {}];
+      const opts = typeof options === "number" ? { family: options } : { ...(options || {}) };
+      original.call(dnsCallback, hostname, { ...opts, all: true }, (err, addrs) => {
+        if (err) return callback(err);
+        const ok = hostAllowed(hostname) ? addrs : addrs.filter((a) => isPublicIp(a.address));
+        if (!ok.length) {
+          const e = new Error(`${hostname} resolves to a private address.`);
+          e.code = "EAI_FAIL";
+          return callback(e);
+        }
+        if (opts.all) return callback(null, ok);
+        callback(null, ok[0].address, ok[0].family);
+      });
+    };
+    dnsCallback.lookup = guarded;
+  }
+
+  return { check, guardDnsLookup };
 }

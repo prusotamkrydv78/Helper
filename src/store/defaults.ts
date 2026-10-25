@@ -9,11 +9,6 @@ export const DEFAULT_PERMISSIONS: ToolPermission[] = [
   { tool: "apps", label: "Desktop apps", description: "Launch and control applications", level: "deny", risk: "high" },
 ];
 
-export const MODELS: Record<Settings["provider"], string[]> = {
-  anthropic: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
-  openai: ["gpt-model-placeholder"],
-  local: ["local-model"],
-};
 
 export const DEFAULT_SETTINGS: Settings = {
   sendOnEnter: true,
@@ -23,10 +18,7 @@ export const DEFAULT_SETTINGS: Settings = {
   fontSize: "md",
   compactMessages: false,
   reduceMotion: false,
-  provider: "anthropic",
-  model: "claude-sonnet-5-5",
-  temperature: 0.7,
-  apiKey: "",
+  model: "",
   systemPrompt: "You are a careful desktop automation assistant. Always ask before changing files.",
   permissions: DEFAULT_PERMISSIONS,
   storeHistoryLocally: true,

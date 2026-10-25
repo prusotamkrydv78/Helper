@@ -15,9 +15,20 @@ interface Props {
   isLast: boolean;
   compact: boolean;
   onRegenerate?: () => void;
+  onOpenSettings?: () => void;
 }
 
-export const MessageBubble = memo(function MessageBubble({ message, task, isLast, compact, onRegenerate }: Props) {
+/** Error kinds the user fixes in Settings (key or model). */
+const SETTINGS_ERRORS = new Set(["missing_api_key", "authentication", "permission_denied", "not_found"]);
+
+export const MessageBubble = memo(function MessageBubble({
+  message,
+  task,
+  isLast,
+  compact,
+  onRegenerate,
+  onOpenSettings,
+}: Props) {
   if (message.role === "user") {
     return (
       <div className={cn("group flex flex-col items-end animate-slide-up", compact ? "py-1.5" : "py-3")}>
@@ -61,6 +72,9 @@ export const MessageBubble = memo(function MessageBubble({ message, task, isLast
               </Badge>
             </Tooltip>
           )}
+          {message.source === "ai" && message.model && (
+            <span className="font-mono text-[10.5px] text-fg-subtle">{message.model}</span>
+          )}
         </div>
 
         {waiting ? (
@@ -80,6 +94,11 @@ export const MessageBubble = memo(function MessageBubble({ message, task, isLast
           <div className="mt-2 flex items-center gap-2 rounded-lg border border-danger/25 bg-danger-soft/50 px-3 py-2 text-xs text-danger">
             <AlertCircle className="size-3.5" />
             <span className="flex-1">{message.error ?? "Something went wrong while generating a response."}</span>
+            {onOpenSettings && message.errorKind && SETTINGS_ERRORS.has(message.errorKind) && (
+              <Button size="sm" variant="ghost" className="h-6 text-danger" onClick={onOpenSettings}>
+                Open settings
+              </Button>
+            )}
             {onRegenerate && (
               <Button size="sm" variant="ghost" className="h-6 text-danger" onClick={onRegenerate}>
                 Try again

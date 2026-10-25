@@ -1,9 +1,9 @@
 // The contract between the UI and the AI orchestration / tool execution layers.
-// Swap the mock implementation for a real one (HTTP, Tauri commands, websockets)
-// without touching components.
+// Swap implementations (mock, Tauri commands, HTTP) without touching components.
 
 import type {
   AgentConnection,
+  AiStatus,
   Automation,
   Conversation,
   ID,
@@ -15,17 +15,18 @@ import type {
 
 export interface ChatRequest {
   conversationId: ID;
-  /** Full history including the new user message. */
+  /** Full ordered history including the new user message. */
   messages: Pick<Message, "role" | "content">[];
-  settings: Pick<Settings, "provider" | "model" | "temperature" | "systemPrompt" | "maxStepsPerTask">;
+  settings: Pick<Settings, "model" | "systemPrompt" | "maxStepsPerTask">;
 }
 
-/** Events emitted while an assistant response is produced. */
+/** Events emitted while an assistant response is produced, in order. */
 export type ChatEvent =
+  | { type: "start"; model: string }
   | { type: "token"; text: string }
   | { type: "task_started"; task: Task }
   | { type: "done" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; kind?: string; retryable?: boolean };
 
 /** Events emitted while a task executes. */
 export type TaskEvent =
@@ -65,10 +66,20 @@ export interface AgentService {
   checkConnection(): Promise<AgentConnection>;
 }
 
+/** AI provider configuration. Keys go in, never come back out. */
+export interface AiConfigService {
+  status(): Promise<AiStatus>;
+  setApiKey(key: string): Promise<AiStatus>;
+  clearApiKey(): Promise<AiStatus>;
+}
+
 export interface Backend {
-  /** True while the app runs on mock implementations. */
-  readonly isMock: boolean;
-  chat: ChatService;
+  /** Mock chat — used when no live AI backend is configured. */
+  mockChat: ChatService;
+  /** Live chat via the Rust backend, or null outside Tauri. */
+  liveChat: ChatService | null;
+  ai: AiConfigService;
+  /** Tasks, automations and the local agent are still mocked. */
   tasks: TaskService;
   automations: AutomationService;
   agent: AgentService;

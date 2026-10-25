@@ -29,7 +29,7 @@ const SUGGESTIONS = [
 ];
 
 export function ChatView({ composerRef }: { composerRef: React.RefObject<ComposerHandle | null> }) {
-  const { state, actions, isMock } = useStore();
+  const { state, actions, ai, liveChat } = useStore();
   const conv = useActiveConversation();
   const streaming = conv ? Boolean(state.streaming[conv.id]) : false;
 
@@ -76,13 +76,18 @@ export function ChatView({ composerRef }: { composerRef: React.RefObject<Compose
   }, [contentKey, state.settings.autoScroll, scrollToBottom]);
 
   // Sending always scrolls down.
-  const msgCount = conv?.messages.length ?? 0;
+  // Keyed on the user-message count: the empty assistant reply is added in the
+  // same tick, so the last message is never the user's when this runs.
+  const userMsgCount = conv?.messages.filter((m) => m.role === "user").length ?? 0;
+  const prevUserCount = useRef(userMsgCount);
   useEffect(() => {
-    if (lastMsg?.role === "user") {
-      stick.current = true;
-      scrollToBottom();
-    }
-  }, [msgCount, lastMsg?.role, scrollToBottom]);
+    const sent = userMsgCount > prevUserCount.current;
+    prevUserCount.current = userMsgCount;
+    if (!sent) return;
+    stick.current = true;
+    setAtBottom(true);
+    requestAnimationFrame(() => scrollToBottom());
+  }, [userMsgCount, scrollToBottom]);
 
   // ---- Header actions ---------------------------------------------------
   const [renaming, setRenaming] = useState(false);
@@ -91,6 +96,7 @@ export function ChatView({ composerRef }: { composerRef: React.RefObject<Compose
   const empty = !conv || conv.messages.length === 0;
   const lastAssistantIdx = conv ? conv.messages.map((m) => m.role).lastIndexOf("assistant") : -1;
   const canRegenerate = !streaming && Boolean(conv?.messages.some((m) => m.role === "user"));
+  const openSettings = useCallback(() => actions.setView("settings"), [actions]);
 
   return (
     <div className="relative flex h-full min-w-0 flex-1">
@@ -124,12 +130,25 @@ export function ChatView({ composerRef }: { composerRef: React.RefObject<Compose
             {conv?.pinned && <Pin className="size-3.5 shrink-0 text-fg-subtle" />}
           </div>
 
-          {isMock && (
-            <Tooltip label="No AI backend is connected. Replies come from a mock service." side="bottom">
-              <span className="hidden items-center gap-1.5 rounded-full border border-border px-2.5 py-0.5 text-[11px] text-fg-muted sm:inline-flex">
-                <span className="size-1.5 rounded-full bg-warning" />
-                Demo mode
-              </span>
+          {ai && (
+            <Tooltip
+              label={
+                liveChat
+                  ? "Chat is connected to OpenAI. Tasks and automations are still simulated."
+                  : ai.available
+                    ? "No API key configured — replies come from a mock service. Add a key in Settings."
+                    : "Running outside the desktop app — replies come from a mock service."
+              }
+              side="bottom"
+            >
+              <button
+                type="button"
+                onClick={() => actions.setView("settings")}
+                className="hidden cursor-pointer items-center gap-1.5 rounded-full border border-border px-2.5 py-0.5 text-[11px] text-fg-muted transition-colors hover:border-border-strong hover:text-fg sm:inline-flex"
+              >
+                <span className={cn("size-1.5 rounded-full", liveChat ? "bg-success" : "bg-warning")} />
+                {liveChat ? "OpenAI connected" : "Demo mode"}
+              </button>
             </Tooltip>
           )}
 
@@ -211,6 +230,7 @@ export function ChatView({ composerRef }: { composerRef: React.RefObject<Compose
                     isLast={i === lastAssistantIdx && i === conv.messages.length - 1}
                     compact={state.settings.compactMessages}
                     onRegenerate={m.role === "assistant" && canRegenerate ? () => actions.regenerate(conv.id) : undefined}
+                    onOpenSettings={openSettings}
                   />
                 ))}
               </div>
@@ -229,9 +249,9 @@ export function ChatView({ composerRef }: { composerRef: React.RefObject<Compose
               <div className="mx-auto max-w-3xl">
                 <Composer ref={composerRef} streaming={streaming} onStop={() => actions.stopGeneration(conv.id)} />
                 <p className="mt-2 text-center text-[11px] text-fg-subtle">
-                  {isMock
+                  {!liveChat
                     ? "Demo mode — responses and task results are simulated. Nothing runs on your PC."
-                    : "AI can make mistakes. Review actions before approving."}
+                    : "AI responses can be wrong. Tasks are still simulated — nothing runs on your PC."}
                 </p>
               </div>
             </div>

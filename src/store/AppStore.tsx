@@ -12,6 +12,7 @@ import {
 import { backend } from "../services";
 import type {
   AgentConnection,
+  AiStatus,
   Attachment,
   Automation,
   Conversation,
@@ -30,8 +31,30 @@ import { isTaskActive, reducer, type AppState, type UIState } from "./reducer";
 // Initial state (synchronous parts read from storage)
 // ---------------------------------------------------------------------------
 
+/** Settings from older versions held an `apiKey` in localStorage — never load it back. */
+const LEGACY_SETTING_KEYS = ["apiKey", "temperature", "provider"];
+
+function loadSettings(): Settings {
+  const stored = load<Record<string, unknown>>("settings", {});
+  const hadLegacy = LEGACY_SETTING_KEYS.some((k) => k in stored);
+  LEGACY_SETTING_KEYS.forEach((k) => delete stored[k]);
+  if (hadLegacy) save("settings", stored); // scrub the old key from disk right away
+  // Older defaults named Claude models; the backend now uses OpenAI.
+  if (typeof stored.model === "string" && stored.model.startsWith("claude-")) stored.model = "";
+  return { ...DEFAULT_SETTINGS, ...(stored as Partial<Settings>) };
+}
+
+const isLive = (ai: AiStatus | null): boolean => Boolean(ai?.available && ai.configured && backend.liveChat);
+
+/** History sent to the model: in order, without failed replies or mock (demo) text. */
+function toHistory(messages: Message[]): Pick<Message, "role" | "content">[] {
+  return messages
+    .filter((m) => m.status !== "error" && m.source !== "mock" && m.content.trim())
+    .map(({ role, content }) => ({ role, content }));
+}
+
 function initialState(): AppState {
-  const settings = { ...DEFAULT_SETTINGS, ...load<Partial<Settings>>("settings", {}) };
+  const settings = loadSettings();
   const ui = load<Partial<UIState>>("ui", {});
   return {
     loaded: false,
@@ -115,13 +138,21 @@ export interface Actions {
   resetSettings(): void;
   clearAllData(): void;
   checkAgent(): void;
+
+  refreshAi(): void;
+  /** Rejects with a BackendError (e.g. invalid key format) — callers show it. */
+  saveApiKey(key: string): Promise<void>;
+  removeApiKey(): Promise<void>;
 }
 
 interface StoreValue {
   state: AppState;
   actions: Actions;
   agent: AgentConnection;
-  isMock: boolean;
+  /** AI backend configuration; null while loading. */
+  ai: AiStatus | null;
+  /** True when chat goes to the real AI backend (otherwise the mock). */
+  liveChat: boolean;
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -133,11 +164,14 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   // Latest state for async callbacks without re-creating actions.
   const stateRef = useRef(state);
   stateRef.current = state;
+  const [ai, setAi] = useState<AiStatus | null>(null);
+  const aiRef = useRef(ai);
+  aiRef.current = ai;
 
   // ---- Hydration --------------------------------------------------------
   useEffect(() => {
     let alive = true;
-    backend.chat
+    backend.mockChat
       .loadConversations()
       .then((convs) => {
         if (!alive) return;
@@ -157,6 +191,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       .catch(() => alive && dispatch({ type: "automations_status", status: "error" }));
 
     backend.agent.checkConnection().then((c) => alive && setAgent(c));
+    backend.ai
+      .status()
+      .then((s) => alive && setAi(s))
+      .catch(() => alive && setAi({ available: true, provider: "openai", configured: false, source: null, keyHint: null }));
     return () => {
       alive = false;
     };
@@ -229,13 +267,15 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
 
   const runAssistant = useCallback((conversationId: ID, history: Pick<Message, "role" | "content">[]) => {
     const s = stateRef.current.settings;
+    const live = isLive(aiRef.current);
+    const chat = live && backend.liveChat ? backend.liveChat : backend.mockChat;
     const assistant: Message = {
       id: uid("msg"),
       role: "assistant",
       content: "",
       createdAt: nowISO(),
       status: "streaming",
-      source: backend.isMock ? "mock" : "ai",
+      source: live ? "ai" : "mock",
     };
     dispatch({ type: "add_message", conversationId, message: assistant });
     dispatch({ type: "set_streaming", conversationId, value: true });
@@ -245,21 +285,18 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     streams.current.set(conversationId, controller);
     let finalStatus: Message["status"] = "complete";
 
-    backend.chat
+    chat
       .streamChat(
         {
           conversationId,
           messages: history,
-          settings: {
-            provider: s.provider,
-            model: s.model,
-            temperature: s.temperature,
-            systemPrompt: s.systemPrompt,
-            maxStepsPerTask: s.maxStepsPerTask,
-          },
+          settings: { model: s.model, systemPrompt: s.systemPrompt, maxStepsPerTask: s.maxStepsPerTask },
         },
         (e) => {
           switch (e.type) {
+            case "start":
+              dispatch({ type: "patch_message", conversationId, messageId: assistant.id, patch: { model: e.model } });
+              break;
             case "token":
               dispatch({ type: "append_token", conversationId, messageId: assistant.id, text: e.text });
               break;
@@ -271,7 +308,13 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
               break;
             case "error":
               finalStatus = "error";
-              dispatch({ type: "patch_message", conversationId, messageId: assistant.id, patch: { error: e.message } });
+              dispatch({
+                type: "patch_message",
+                conversationId,
+                messageId: assistant.id,
+                // A refused response's partial text shouldn't be presented as an answer.
+                patch: { error: e.message, errorKind: e.kind, ...(e.kind === "refusal" ? { content: "" } : {}) },
+              });
               break;
             case "done":
               break;
@@ -378,21 +421,16 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
           attachments: attachments?.length ? attachments : undefined,
         };
         dispatch({ type: "add_message", conversationId: convId, message: userMsg });
-        const history = [...(conv?.messages ?? []), userMsg]
-          .filter((m) => m.status !== "error")
-          .map(({ role, content: c }) => ({ role, content: c }));
-        runAssistant(convId, history);
+        runAssistant(convId, toHistory([...(conv?.messages ?? []), userMsg]));
       },
       stopGeneration: (conversationId) => streams.current.get(conversationId)?.abort(),
       regenerate: (conversationId) => {
         const conv = stateRef.current.conversations.find((c) => c.id === conversationId);
         if (!conv || stateRef.current.streaming[conversationId]) return;
-        const lastUser = [...conv.messages].reverse().find((m) => m.role === "user");
-        if (!lastUser) return;
-        runAssistant(
-          conversationId,
-          conv.messages.filter((m) => m.role === "user").map(({ role, content }) => ({ role, content })),
-        );
+        // Replay everything up to and including the latest user message.
+        const lastUserIdx = conv.messages.map((m) => m.role).lastIndexOf("user");
+        if (lastUserIdx < 0) return;
+        runAssistant(conversationId, toHistory(conv.messages.slice(0, lastUserIdx + 1)));
       },
 
       approveStep: (taskId, stepId) => void backend.tasks.approveStep(taskId, stepId),
@@ -465,11 +503,20 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         setAgent({ state: "checking" });
         backend.agent.checkConnection().then(setAgent);
       },
+
+      refreshAi: () => {
+        backend.ai.status().then(setAi).catch(() => {});
+      },
+      saveApiKey: async (key) => setAi(await backend.ai.setApiKey(key)),
+      removeApiKey: async () => setAi(await backend.ai.clearApiKey()),
     }),
     [createConversation, runAssistant, startTaskMessage],
   );
 
-  const value = useMemo(() => ({ state, actions, agent, isMock: backend.isMock }), [state, actions, agent]);
+  const value = useMemo(
+    () => ({ state, actions, agent, ai, liveChat: isLive(ai) }),
+    [state, actions, agent, ai],
+  );
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }
 

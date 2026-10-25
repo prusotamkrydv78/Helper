@@ -5,7 +5,7 @@
 import type { Automation, ID, Task, TaskStep } from "../../types";
 import { isAbortError, nowISO, sleep, uid } from "../../lib/utils";
 import { load } from "../../lib/storage";
-import type { Backend, ChatEvent, TaskEvent } from "../types";
+import type { AgentService, AutomationService, ChatEvent, ChatService, TaskEvent, TaskService } from "../types";
 import { chatReply, pickBlueprint, type TaskBlueprint } from "./templates";
 
 type Listener = (e: TaskEvent) => void;
@@ -168,8 +168,12 @@ async function streamText(text: string, onEvent: (e: ChatEvent) => void, signal:
 
 const blueprintByTask = new Map<ID, { bp: TaskBlueprint; prompt: string }>();
 
-export const mockBackend: Backend = {
-  isMock: true,
+export const mockBackend: {
+  chat: ChatService;
+  tasks: TaskService;
+  automations: AutomationService;
+  agent: AgentService;
+} = {
 
   chat: {
     async streamChat(req, onEvent, signal) {

@@ -3,6 +3,7 @@ import {
   Bot,
   Cpu,
   Eye,
+  KeyRound,
   EyeOff,
   Monitor,
   Moon,
@@ -17,11 +18,11 @@ import {
 import type { PermissionLevel, Settings } from "../types";
 import { cn, formatRelative } from "../lib/utils";
 import { useStore } from "../store/AppStore";
-import { MODELS } from "../store/defaults";
+import { toBackendError } from "../services/tauri/tauriAi";
 import { Page, PageHeader } from "../components/layout/Page";
 import { Button, Spinner } from "../components/ui/Button";
 import { ConfirmDialog, Tooltip, useToast } from "../components/ui/overlays";
-import { Badge, Field, Input, Segmented, Select, Switch, Textarea } from "../components/ui/primitives";
+import { Badge, Field, Input, Segmented, Switch, Textarea } from "../components/ui/primitives";
 
 const SECTIONS = [
   { id: "general", label: "General", icon: SlidersHorizontal },
@@ -58,7 +59,6 @@ export function SettingsPage() {
   const toast = useToast();
   const s = state.settings;
   const set = (patch: Partial<Settings>) => actions.updateSettings(patch);
-  const [showKey, setShowKey] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
 
@@ -151,83 +151,7 @@ export function SettingsPage() {
             </Field>
           </Section>
 
-          <Section
-            id="model"
-            title="AI model"
-            badge={<UiOnly />}
-            description="Configure the model used for chat and planning. No AI backend is connected yet — replies come from a mock service."
-          >
-            <div className="grid gap-x-4 sm:grid-cols-2">
-              <Field label="Provider">
-                {(id) => (
-                  <Select
-                    id={id}
-                    value={s.provider}
-                    onChange={(e) => {
-                      const provider = e.target.value as Settings["provider"];
-                      set({ provider, model: MODELS[provider][0] });
-                    }}
-                  >
-                    <option value="anthropic">Anthropic</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="local">Local model</option>
-                  </Select>
-                )}
-              </Field>
-              <Field label="Model">
-                {(id) => (
-                  <Select id={id} value={s.model} onChange={(e) => set({ model: e.target.value })}>
-                    {MODELS[s.provider].map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </Select>
-                )}
-              </Field>
-            </div>
-            <Field label="API key" description="Stored only on this device. It isn't sent anywhere until a backend exists.">
-              {(id) => (
-                <div className="relative">
-                  <Input
-                    id={id}
-                    type={showKey ? "text" : "password"}
-                    value={s.apiKey}
-                    onChange={(e) => set({ apiKey: e.target.value })}
-                    placeholder="Not configured"
-                    autoComplete="off"
-                    spellCheck={false}
-                    className="pr-9 font-mono"
-                  />
-                  <button
-                    type="button"
-                    aria-label={showKey ? "Hide API key" : "Show API key"}
-                    onClick={() => setShowKey((v) => !v)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer rounded p-1 text-fg-subtle hover:text-fg"
-                  >
-                    {showKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                  </button>
-                </div>
-              )}
-            </Field>
-            <Field label={`Temperature · ${s.temperature.toFixed(1)}`} description="Lower is more focused, higher is more creative.">
-              {(id) => (
-                <input
-                  id={id}
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.1}
-                  value={s.temperature}
-                  onChange={(e) => set({ temperature: Number(e.target.value) })}
-                  className="w-full cursor-pointer accent-[var(--accent)]"
-                />
-              )}
-            </Field>
-            <Field label="System instructions">
-              {(id) => <Textarea id={id} rows={3} value={s.systemPrompt} onChange={(e) => set({ systemPrompt: e.target.value })} />}
-            </Field>
-          </Section>
+          <AiModelSection />
 
           <Section
             id="permissions"
@@ -399,5 +323,161 @@ export function SettingsPage() {
         confirmLabel="Clear history"
       />
     </Page>
+  );
+}
+
+function AiModelSection() {
+  const { state, actions, ai, liveChat } = useStore();
+  const toast = useToast();
+  const s = state.settings;
+  const [keyInput, setKeyInput] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+
+  async function saveKey() {
+    setSaving(true);
+    setError(null);
+    try {
+      await actions.saveApiKey(keyInput);
+      setKeyInput(""); // never keep the key in UI state once stored
+      setShowKey(false);
+      toast("API key saved to the system credential store", "success");
+    } catch (e) {
+      setError(toBackendError(e).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeKey() {
+    try {
+      await actions.removeApiKey();
+      toast("API key removed", "success");
+    } catch (e) {
+      toast(toBackendError(e).message, "error");
+    }
+  }
+
+  const statusBadge = !ai ? (
+    <Badge tone="neutral">Checking…</Badge>
+  ) : !ai.available ? (
+    <Badge tone="warning">Desktop app only</Badge>
+  ) : liveChat ? (
+    <Badge tone="success">Connected</Badge>
+  ) : (
+    <Badge tone="warning">Not configured</Badge>
+  );
+
+  return (
+    <Section
+      id="model"
+      title="AI model"
+      badge={statusBadge}
+      description="Chat is sent to OpenAI through the app's Rust backend. Without a key, replies come from the built-in mock."
+    >
+      <Field
+        label="API key"
+        description={
+          ai?.source === "environment"
+            ? "Using OPENAI_API_KEY from the environment. Unset it to manage the key here."
+            : "Stored in the system credential store (Windows Credential Manager). It never leaves the backend."
+        }
+      >
+        {(id) =>
+          !ai?.available ? (
+            <p className="text-sm text-fg-muted">Open the desktop app (npm run tauri dev) to configure a key.</p>
+          ) : ai.configured ? (
+            <div className="flex items-center gap-3">
+              <span className="flex h-8.5 flex-1 items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 font-mono text-sm text-fg-muted">
+                <KeyRound className="size-3.5" />
+                sk-•••• {ai.keyHint}
+                <span className="ml-auto font-sans text-xs text-fg-subtle">
+                  {ai.source === "environment" ? "environment" : "credential store"}
+                </span>
+              </span>
+              {ai.source === "keychain" && (
+                <Button variant="danger-ghost" onClick={() => setConfirmRemove(true)}>
+                  Remove
+                </Button>
+              )}
+            </div>
+          ) : (
+            <form
+              className="space-y-1.5"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (keyInput.trim()) void saveKey();
+              }}
+            >
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Input
+                    id={id}
+                    type={showKey ? "text" : "password"}
+                    value={keyInput}
+                    onChange={(e) => {
+                      setKeyInput(e.target.value);
+                      setError(null);
+                    }}
+                    placeholder="sk-…"
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-invalid={error !== null}
+                    className="pr-9 font-mono"
+                  />
+                  <button
+                    type="button"
+                    aria-label={showKey ? "Hide API key" : "Show API key"}
+                    onClick={() => setShowKey((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer rounded p-1 text-fg-subtle hover:text-fg"
+                  >
+                    {showKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                  </button>
+                </div>
+                <Button type="submit" variant="primary" loading={saving} disabled={!keyInput.trim()}>
+                  Save key
+                </Button>
+              </div>
+              {error && <p className="text-xs text-danger">{error}</p>}
+            </form>
+          )
+        }
+      </Field>
+      <Field
+        label="Model"
+        description="Leave empty to use the backend default (OPENAI_MODEL, or gpt-4o-mini). Any model your account can use with Chat Completions works."
+      >
+        {(id) => (
+          <Input
+            id={id}
+            value={s.model}
+            onChange={(e) => actions.updateSettings({ model: e.target.value })}
+            placeholder="Default"
+            spellCheck={false}
+            className="font-mono"
+          />
+        )}
+      </Field>
+      <Field label="System instructions">
+        {(id) => (
+          <Textarea
+            id={id}
+            rows={3}
+            value={s.systemPrompt}
+            onChange={(e) => actions.updateSettings({ systemPrompt: e.target.value })}
+          />
+        )}
+      </Field>
+      <ConfirmDialog
+        open={confirmRemove}
+        onClose={() => setConfirmRemove(false)}
+        onConfirm={() => void removeKey()}
+        title="Remove API key?"
+        description="Chat will switch back to demo mode until you add a key again."
+        confirmLabel="Remove"
+      />
+    </Section>
   );
 }

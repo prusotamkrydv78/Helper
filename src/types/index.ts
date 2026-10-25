@@ -16,7 +16,11 @@ export interface Message {
   taskId?: ID;
   /** Mock responses are labeled so they are never mistaken for real AI output. */
   source?: "mock" | "ai";
+  /** Model that produced a live response. */
+  model?: string;
   error?: string;
+  /** Backend error kind (e.g. "missing_api_key", "rate_limited") for tailored recovery UI. */
+  errorKind?: string;
   attachments?: Attachment[];
 }
 
@@ -141,11 +145,9 @@ export interface Settings {
   fontSize: FontSize;
   compactMessages: boolean;
   reduceMotion: boolean;
-  // AI model (UI only)
-  provider: "anthropic" | "openai" | "local";
+  // AI model. The API key is never stored here — it lives in the OS credential store.
+  /** Empty string = the backend default (`OPENAI_MODEL` or the built-in fallback). */
   model: string;
-  temperature: number;
-  apiKey: string;
   systemPrompt: string;
   // Tool permissions (UI only)
   permissions: ToolPermission[];
@@ -162,4 +164,14 @@ export type AgentConnection =
   | { state: "disconnected"; checkedAt: ISODate; detail: string }
   | { state: "connected"; checkedAt: ISODate; version: string };
 
-export type View = "chat" | "tasks" | "automations" | "history" | "settings";
+/** AI backend configuration as reported by the Rust side. Never contains the key. */
+export interface AiStatus {
+  /** False when running outside Tauri (e.g. plain browser dev) — chat falls back to the mock. */
+  available: boolean;
+  provider: string;
+  configured: boolean;
+  source: "environment" | "keychain" | null;
+  keyHint: string | null;
+}
+
+export type View ="chat" | "tasks" | "automations" | "history" | "settings";

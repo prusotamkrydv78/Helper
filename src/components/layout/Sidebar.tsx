@@ -105,7 +105,7 @@ export function Sidebar({ searchRef }: { searchRef: React.RefObject<HTMLInputEle
       </div>
 
       {/* Navigation */}
-      <nav className="space-y-0.5 px-2.5 pb-2">
+      <nav className={cn("px-2.5 pb-2", collapsed ? "flex flex-col items-center gap-1" : "space-y-0.5")}>
         {NAV.map(({ view, label, icon: Icon }) => {
           const active = state.ui.view === view;
           const badge =
@@ -127,8 +127,8 @@ export function Sidebar({ searchRef }: { searchRef: React.RefObject<HTMLInputEle
               aria-current={active ? "page" : undefined}
               aria-label={label}
               className={cn(
-                "relative flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-lg text-sm transition-colors",
-                collapsed ? "justify-center" : "px-2.5",
+                "relative flex h-8 cursor-pointer items-center gap-2.5 rounded-lg text-sm transition-colors",
+                collapsed ? "w-9 justify-center" : "w-full px-2.5",
                 active ? "bg-surface-3 text-fg" : "text-fg-muted hover:bg-surface-2 hover:text-fg",
               )}
             >

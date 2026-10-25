@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && node scripts/bundle-node.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -24,6 +24,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "resources/node.exe": "browser-worker/node.exe",
+      "../browser-worker/worker.mjs": "browser-worker/worker.mjs",
+      "../browser-worker/policy.mjs": "browser-worker/policy.mjs",
+      "../node_modules/playwright-core/": "browser-worker/node_modules/playwright-core/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

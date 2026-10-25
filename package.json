@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:browser": "node --test browser-worker/test/worker.test.mjs"
+    "test:browser": "node --test browser-worker/test/worker.test.mjs",
+    "postinstall": "node scripts/bundle-node.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

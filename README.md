@@ -104,7 +104,10 @@ markup is supported too), `AA_NODE_PATH` sets the Node binary, and `AA_BROWSER_W
 **Safety (enforced in code, not just in the prompt):**
 - **Destinations:** only `http`/`https`. IPv6 forms that embed an IPv4 address (`::ffff:7f00:1`, `::127.0.0.1`, 6to4, Teredo) are treated by the embedded address. The Rust backend checks each URL before the browser loads it: `localhost`, `.local`/`.internal` names, single-label hosts, private/loopback/link-local/CGNAT/metadata IPs, and hosts that *resolve* to such addresses are all refused. Inside the browser, **every** request (navigations, every redirect hop, images, scripts, `fetch`, WebSockets) is checked against the same rules, so a public page can't reach your local network. Requests are fetched by the worker
   process, and its DNS lookups are filtered again at connect time, so a host can't pass the check and then
-  re-resolve to a private address (DNS rebinding). Service workers are blocked and WebRTC is kept off local addresses.
+  re-resolve to a private address (DNS rebinding). Service workers are blocked and WebRTC is kept off local addresses. WebSockets are
+  connected by the worker process too (Node 22+), so they get the same connect-time check; on older Node
+  the browser connects them after the URL check, without the rebinding guard. Proxied WebSockets don't
+  carry browser cookies or subprotocols.
 - **Approvals** come from inspecting the real element, not from the model's description. For example, clicking a button that submits a form asks “Submits a form (“Send”) to https://…”.
 - **File uploads** aren't supported. Downloads go only into allowed folders, file names are sanitized, and the saved path is checked again afterwards.
 - **Untrusted content:** page text, links and search results reach the model labeled as untrusted data, and the system prompt tells it never to follow instructions found on pages.
@@ -115,6 +118,37 @@ filling and submitting a form on a controlled test page, with the approval promp
 prompt-injection page, whose planted instructions were ignored. Downloads, the address
 blocking and redirects are covered by the automated tests against local pages. A live
 download from a public site hasn't been tested.
+
+## Workflows
+
+The **Workflows** page turns a goal into ordered steps (planned by the model without tools, or typed
+yourself, editable before starting) and runs them one at a time. Each step is a normal chat turn in the
+workflow's own conversation, so it uses the same tools, permissions, approvals, task cards and Stop as chat.
+The model must end each step with `STEP RESULT: SUCCESS` or `STEP RESULT: FAILED - reason`; a missing line,
+an error, or demo mode counts as failed.
+
+- **Controls:** start, pause (after the current step), resume, cancel (aborts the running step, its pending
+  approvals and tools), retry or skip a failed/interrupted step, delete.
+- **Persistence:** saved by the backend to `workflows.json` in the app config folder (atomic write). A step is
+  saved as running *before* it starts; after a crash or restart it becomes **interrupted** and is never
+  re-run automatically, because it may already have had effects. You decide to retry or skip it.
+- **One workflow runs at a time** (tools such as the browser session are shared).
+
+### Schedules
+
+Under Workflows → **Schedules**, a workflow can run once, daily, weekly (chosen days) or every N minutes
+(at least 15). Schedules are saved by the backend (`schedules.json`). Every run starts a **fresh copy** of the
+workflow's steps through the workflow engine, so permissions, approvals and Stop apply as usual, and steps of
+an earlier (possibly interrupted) run are never repeated.
+
+- **Only while the app is open.** There is no background service: nothing runs while the app is closed.
+  Runs that were due while the app was closed or the computer slept (more than 10 minutes late) are either
+  skipped or caught up **once**, as chosen per schedule.
+- **No duplicates:** the next run time is advanced and saved before a run starts. If another workflow is
+  running, a due run waits up to an hour, then is skipped and noted.
+- **Time zones:** times are local wall-clock times on this computer (DST-aware). The zone a schedule was
+  created in is shown if the computer's zone has changed since.
+- Unattended steps that need approval wait in the run's conversation until you answer.
 
 ## Desktop app tools (Windows)
 
@@ -127,8 +161,10 @@ never synthetic mouse or keyboard input or screenshots.
 | `app_list_windows` | Visible top-level windows: handle, title, executable | none |
 | `app_get_ui_tree` | A window's named elements (max 300), each with a ref like `e3_12` | none |
 | `app_focus` | Brings a window to the front | when “Desktop apps” = Ask |
-| `app_launch` | Starts an app from Settings → Allowed apps, without arguments or a shell | always |
-| `app_click` | Invokes/toggles/selects/expands an element by ref | always |
+| `app_list_installed` | Installed apps from the Start menu (name + shortcut path) | none |
+| `app_launch` | Starts an allow-listed `.exe` (no arguments, no shell) or opens an allow-listed Start-menu `.lnk` | always |
+| `app_select_option` | Chooses a named item in a list/combo box/menu (expand → select/invoke) | always |
+| `app_click` | Invokes/toggles/selects/expands an element by ref; falls back to the MSAA default action | always |
 | `app_type` | Sets the text of an editable field by ref (max 10,000 characters) | always |
 
 **Setup:** set Settings → Tool permissions → “Desktop apps” to Ask or Allow (default: Deny, which hides
@@ -144,10 +180,26 @@ the tools). To allow launching, list full `.exe` paths, one per line, under “A
 - Approval prompts describe the real element, e.g. *Click button “Save” in “Untitled - Notepad”*.
 - Window and element text reaches the model labeled as untrusted.
 
+Documents and text fields include their visible text (Value or Text pattern, up to 4,000 characters).
+Hung windows (`IsHungAppWindow`) are refused up front with `app_not_responding`; controls with no usable
+pattern fail with `unsupported_control` and nothing is done.
+
 **Known limits:** apps that don't expose UI Automation (many custom-drawn apps and games) can't be operated.
 Windows may refuse to bring a window to the front. Each call has the 30-second timeout and Stop works, but a call
-stuck inside a hung app keeps its background thread until the app responds (later calls use other threads).
+runs on its own thread, so a hung app only holds that thread; after 4 calls are stuck, new desktop calls are
+refused until the app recovers. `app_type` reads the value back and reports `value_confirmed`.
 Only one window's refs are kept at a time, shared across chats. Not yet covered by automated tests.
+
+## Packaging
+
+`npm install` (postinstall) copies the Node.js runtime it runs on into `src-tauri/resources/node.exe`
+(git-ignored); `npm run tauri build` runs it again and bundles that runtime, `browser-worker/` and
+`node_modules/playwright-core` as app resources (`bundle.resources` in `src-tauri/tauri.conf.json`).
+The installed app finds the worker and `node.exe` next to its executable, so it needs neither the source
+tree nor a global Node.js (release builds never fall back to the source tree; `AA_NODE_PATH` still overrides).
+Edge (or Chrome via `AA_BROWSER_CHANNEL`) must be installed; otherwise browser calls fail with
+`browser_unavailable` and the rest of the app works. The bundled layout was run standalone with the worker;
+a full installer build hasn't been tested yet. The bundled runtime adds about 90 MB.
 
 ## Checks
 
@@ -202,6 +254,7 @@ Error kinds about the key or model also offer **Open settings**.
 
 `tools/` holds the registry (`mod.rs`), path confinement (`paths.rs`), the four tools (`fs.rs`) and the allowed-folder store (`allowed_dirs.rs`). Tool events (`tool_call`, `tool_status`) stream over the same Tauri channel and drive the existing task UI.
 
-**Known limits:** tool-call turns aren't saved in chat history, so follow-up
-messages see the final answer but not the raw tool results. The model decides
+**Follow-ups:** each assistant reply sent back as history carries a compact tool record
+(tool, arguments, status, clipped output or error), labeled as data, so follow-up questions can use
+real results. Raw tool messages themselves aren't replayed. The model decides
 whether to request several tools at once; independent reads run concurrently when it does.

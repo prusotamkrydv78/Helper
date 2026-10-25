@@ -1,6 +1,7 @@
 // Controlled test pages served from 127.0.0.1, plus a helper that drives the
 // real worker process over its stdin/stdout protocol.
 
+import crypto from "node:crypto";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
@@ -95,6 +96,28 @@ export function sitePages(otherPort) {
         </script></main>`,
       "Leak",
     ),
+    "/ws.html": html(
+      `<main><p id="out">waiting</p><script>
+        const ws = new WebSocket("ws://" + location.host + "/echo");
+        ws.onopen = () => ws.send("ping");
+        ws.onmessage = (e) => { document.getElementById("out").textContent = e.data; document.title = "ws:" + e.data; };
+        ws.onerror = () => { document.title = "ws-error"; };
+      </script></main>`,
+      "WS",
+    ),
+    "/sw.html": html(
+      `<main><script>
+        navigator.serviceWorker.register("/sw.js").then(
+          () => { document.title = "sw-registered"; },
+          (e) => { document.title = "sw-failed"; },
+        );
+      </script></main>`,
+      "SW",
+    ),
+    "/sw.js": (req, res) => {
+      res.writeHead(200, { "content-type": "text/javascript" });
+      res.end("self.addEventListener('fetch', () => {});");
+    },
     "/hop": (req, res) => {
       res.writeHead(302, { location: "/page2.html" });
       res.end();
@@ -138,4 +161,25 @@ export async function startWorker(env) {
       child.stdin.end();
     });
   return { call, stop, stderr: () => stderr };
+}
+
+/** Minimal WebSocket echo endpoint (text frames under 126 bytes) for proxy tests. */
+export function attachEchoWebSocket(server, received) {
+  server.on("upgrade", (req, socket) => {
+    const accept = crypto.createHash("sha1").update(req.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    socket.on("data", (buf) => {
+      const opcode = buf[0] & 0x0f;
+      const len = buf[1] & 0x7f;
+      const mask = buf.subarray(2, 6);
+      const payload = Buffer.from(buf.subarray(6, 6 + len).map((b, i) => b ^ mask[i % 4]));
+      if (opcode === 8) return socket.end(Buffer.from([0x88, 0]));
+      if (opcode !== 1) return;
+      const text = payload.toString();
+      received.push(text);
+      const reply = Buffer.from(`echo:${text}`);
+      socket.write(Buffer.concat([Buffer.from([0x81, reply.length]), reply]));
+    });
+    socket.on("error", () => {});
+  });
 }

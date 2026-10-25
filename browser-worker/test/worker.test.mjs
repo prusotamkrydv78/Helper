@@ -7,14 +7,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startServer, sitePages, startWorker } from "./fixtures.mjs";
+import { startServer, sitePages, startWorker, attachEchoWebSocket } from "./fixtures.mjs";
 import { createPolicy, isPublicIp } from "../policy.mjs";
 
 let site, other, worker, base, downloadDir;
+const wsReceived = [];
 
 before(async () => {
   other = await startServer({ "/img-hit": hit, "/fetch-hit": hit, "/redirect-hit": hit, "/ws": hit });
   site = await startServer(sitePages(other.port));
+  attachEchoWebSocket(site.server, wsReceived);
   base = `http://127.0.0.1:${site.port}`;
   downloadDir = fs.mkdtempSync(path.join(os.tmpdir(), "aa-dl-"));
   worker = await startWorker({
@@ -159,4 +161,47 @@ test("search parses Bing markup and reports blocked/empty result pages", async (
   assert.equal(c.error.code, "no_results");
   assert.match(c.error.message, /confirm you are human/);
   await cap.stop();
+});
+
+test("connect-time DNS guard rejects private answers (DNS rebinding)", async () => {
+  const dnsMod = (await import("node:dns")).default;
+  const saved = { p: dnsMod.promises.lookup, c: dnsMod.lookup };
+  let calls = 0;
+  // First answer public (passes validation), later answers private (rebinding).
+  dnsMod.promises.lookup = async () => (calls++ === 0 ? [{ address: "93.184.216.34", family: 4 }] : [{ address: "127.0.0.1", family: 4 }]);
+  dnsMod.lookup = (_h, _o, cb) => cb(null, [{ address: "10.0.0.5", family: 4 }]);
+  try {
+    createPolicy({}).guardDnsLookup();
+    assert.equal((await dnsMod.promises.lookup("rebind.test", { all: true }))[0].address, "93.184.216.34");
+    await assert.rejects(dnsMod.promises.lookup("rebind.test", { all: true }), /private address/);
+    await new Promise((resolve) =>
+      dnsMod.lookup("rebind.test", {}, (err) => {
+        assert.match(String(err?.message), /private address/);
+        resolve();
+      }),
+    );
+  } finally {
+    dnsMod.promises.lookup = saved.p;
+    dnsMod.lookup = saved.c;
+  }
+});
+
+test("allowed WebSockets work in both directions through the worker", async () => {
+  const r = await worker.call("open", { url: `${base}/ws.html` });
+  assert.ok(r.ok, JSON.stringify(r));
+  let title = "";
+  for (let i = 0; i < 30 && !title.startsWith("ws"); i++) {
+    await new Promise((res) => setTimeout(res, 100));
+    title = (await worker.call("content", { maxChars: 500 })).result?.title ?? "";
+  }
+  assert.deepEqual(wsReceived, ["ping"], "server got the page's message");
+  assert.equal(title, "ws:echo:ping", "page got the server's reply");
+});
+
+test("service workers are blocked", async () => {
+  const r = await worker.call("open", { url: `${base}/sw.html` });
+  assert.ok(r.ok, JSON.stringify(r));
+  await new Promise((res) => setTimeout(res, 1500));
+  const title = (await worker.call("content", { maxChars: 500 })).result?.title;
+  assert.notEqual(title, "sw-registered");
 });

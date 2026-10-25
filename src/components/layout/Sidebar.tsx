@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  ListOrdered,
   History,
   ListChecks,
   MessageSquare,
@@ -28,6 +29,7 @@ import { Kbd, Skeleton } from "../ui/primitives";
 const NAV: { view: View; label: string; icon: typeof MessageSquare }[] = [
   { view: "chat", label: "Chats", icon: MessageSquare },
   { view: "tasks", label: "Tasks", icon: ListChecks },
+  { view: "workflows", label: "Workflows", icon: ListOrdered },
   { view: "automations", label: "Automations", icon: Workflow },
   { view: "history", label: "History", icon: History },
 ];

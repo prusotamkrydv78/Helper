@@ -5,6 +5,9 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { ChatView } from "./components/chat/ChatView";
 import type { ComposerHandle } from "./components/chat/Composer";
 import { TasksPage } from "./pages/TasksPage";
+import { WorkflowsPage } from "./pages/WorkflowsPage";
+import { WorkflowProvider } from "./store/WorkflowStore";
+import { ScheduleProvider } from "./store/ScheduleStore";
 import { AutomationsPage } from "./pages/AutomationsPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -78,6 +81,7 @@ function Shell() {
       <main className="relative min-w-0 flex-1">
         {state.ui.view === "chat" && <ChatView composerRef={composerRef} />}
         {state.ui.view === "tasks" && <TasksPage />}
+        {state.ui.view === "workflows" && <WorkflowsPage />}
         {state.ui.view === "automations" && <AutomationsPage />}
         {state.ui.view === "history" && <HistoryPage />}
         {state.ui.view === "settings" && <SettingsPage />}
@@ -89,9 +93,13 @@ function Shell() {
 export default function App() {
   return (
     <AppStoreProvider>
-      <ToastProvider>
-        <Shell />
-      </ToastProvider>
+      <WorkflowProvider>
+        <ScheduleProvider>
+          <ToastProvider>
+            <Shell />
+          </ToastProvider>
+        </ScheduleProvider>
+      </WorkflowProvider>
     </AppStoreProvider>
   );
 }

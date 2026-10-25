@@ -99,8 +99,7 @@ export const tauriChat: ChatService = {
           systemPrompt: req.settings.systemPrompt,
           permissions: req.permissions,
           maxToolRounds: req.settings.maxStepsPerTask,
-          allowedApps: req.settings.allowedApps.split("
-").map((l) => l.trim()).filter(Boolean),
+          allowedApps: req.settings.allowedApps.split("\n").map((l) => l.trim()).filter(Boolean),
         },
         onEvent: channel,
       });

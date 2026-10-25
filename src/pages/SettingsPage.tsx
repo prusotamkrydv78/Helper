@@ -200,7 +200,7 @@ export function SettingsPage() {
                 )}
               </Field>
             ))}
-            <Field label="Allowed apps" description="Apps the assistant may launch, one full .exe path per line. Leave empty to disable launching.">
+            <Field label="Allowed apps" description="Apps the assistant may launch: one full .exe or Start-menu .lnk path per line (the assistant can list installed apps for you). Leave empty to disable launching.">
               {(id) => (
                 <Textarea
                   id={id}

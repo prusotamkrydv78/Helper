@@ -6,6 +6,7 @@ mod desktop;
 mod error;
 mod state;
 mod tools;
+mod workflows;
 
 use tauri::Manager;
 
@@ -47,6 +48,11 @@ pub fn run() {
             commands::list_allowed_dirs,
             commands::add_allowed_dir,
             commands::remove_allowed_dir,
+            workflows::workflows_load,
+            workflows::workflows_save,
+            workflows::schedules_load,
+            workflows::schedules_save,
+            workflows::workflow_plan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -187,9 +187,21 @@ pub const TOOLS: &[ToolSpec] = &[
         }),
     },
     ToolSpec {
+        name: "app_list_installed",
+        title: "List installed apps",
+        description: "List installed apps from the Start menu (name and shortcut path). Only apps on the user's allowed-apps list can be launched.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
         name: "app_launch",
         title: "Launch app",
-        description: "Start an app from the user's allowed-apps list (by full path or name without .exe). No arguments are passed. Needs the user's approval.",
+        description: "Start an app from the user's allowed-apps list (an .exe or Start-menu .lnk path, or its name without the extension). No arguments are passed. Needs the user's approval.",
         kind: ToolKind::Desktop,
         parameters: || json!({
             "type": "object",
@@ -231,6 +243,21 @@ pub const TOOLS: &[ToolSpec] = &[
             "type": "object",
             "properties": { "ref": { "type": "string", "description": "Element ref from app_get_ui_tree, e.g. e3_12." } },
             "required": ["ref"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "app_select_option",
+        title: "Choose option",
+        description: "Choose an item by its visible name inside a list, combo box or menu (by ref). Needs the user's approval.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": {
+                "ref": { "type": "string", "description": "Ref of the list or combo box from app_get_ui_tree, e.g. e3_12." },
+                "option": { "type": "string", "description": "Visible name of the item to choose." }
+            },
+            "required": ["ref", "option"],
             "additionalProperties": false
         }),
     },

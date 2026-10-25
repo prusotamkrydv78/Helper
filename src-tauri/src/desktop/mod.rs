@@ -35,11 +35,60 @@ struct TypeArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SelectArgs {
+    #[serde(rename = "ref")]
+    element: String,
+    option: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LaunchArgs {
     app: String,
 }
 
 const MAX_TEXT: usize = 10_000;
+/// Desktop calls still running (possibly stuck in a frozen app). Beyond this, new calls are refused.
+const MAX_IN_FLIGHT: usize = 4;
+static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Runs a UI Automation call on its own thread (not the shared blocking pool), so an app
+/// that never answers only holds that thread. Times out after `TOOL_TIMEOUT`.
+pub async fn run_isolated<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, ToolError> + Send + 'static,
+) -> Result<T, ToolError> {
+    use std::sync::atomic::Ordering;
+    struct Slot;
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    if IN_FLIGHT.fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        return Err(ToolError::new(
+            "app_not_responding",
+            "Earlier desktop actions are still stuck in an app that isn't responding. Close or restart that app, then try again.",
+        ));
+    }
+    let slot = Slot;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("desktop-uia".into())
+        .spawn(move || {
+            let _slot = slot;
+            let _ = tx.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
+        })
+        .map_err(|e| ToolError::new("internal_error", format!("Couldn't start a desktop worker thread: {e}")))?;
+    match tokio::time::timeout(crate::tools::TOOL_TIMEOUT, rx).await {
+        Err(_) => Err(ToolError::new(
+            "app_not_responding",
+            format!("The app didn't respond within {}s.", crate::tools::TOOL_TIMEOUT.as_secs()),
+        )),
+        Ok(Err(_)) | Ok(Ok(Err(_))) => Err(ToolError::new("internal_error", "The desktop action crashed.")),
+        Ok(Ok(Ok(r))) => r,
+    }
+}
 
 fn clip(s: &str, max: usize) -> String {
     let s = s.trim();
@@ -60,9 +109,9 @@ fn resolve_app(raw: &str, allowed: &[String]) -> Result<std::path::PathBuf, Tool
                 || p.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == want)
         })
         .ok_or_else(|| ToolError::denied(format!("`{}` is not in the user's allowed apps.", raw.trim())))?;
-    let is_exe = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"));
-    if !path.is_absolute() || !is_exe || !path.is_file() {
-        return Err(ToolError::not_found(format!("{} is not an existing .exe file.", path.display())));
+    let ok_ext = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe") || e.eq_ignore_ascii_case("lnk"));
+    if !path.is_absolute() || !ok_ext || !path.is_file() {
+        return Err(ToolError::not_found(format!("{} is not an existing .exe or .lnk file.", path.display())));
     }
     Ok(path)
 }
@@ -84,6 +133,15 @@ pub fn execute(spec: &ToolSpec, args: &Value, allowed: &[String]) -> Result<Tool
         "app_launch" => {
             let a: LaunchArgs = crate::tools::parse(args)?;
             let path = resolve_app(&a.app, allowed)?;
+            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) {
+                // Start-menu shortcuts are opened by the shell, still without extra arguments.
+                imp::open_shortcut(&path)?;
+                return Ok(ToolOutput {
+                    content: serde_json::json!({ "launched": path.display().to_string() }),
+                    summary: format!("Opened {}", path.display()),
+                    file: None,
+                });
+            }
             let mut cmd = std::process::Command::new(&path);
             if let Some(dir) = path.parent() {
                 cmd.current_dir(dir);
@@ -112,6 +170,9 @@ mod imp {
     pub fn execute(_: &str, _: &Value) -> Result<ToolOutput, ToolError> {
         Err(unsupported())
     }
+    pub fn open_shortcut(_: &std::path::Path) -> Result<(), ToolError> {
+        Err(unsupported())
+    }
 }
 
 #[cfg(windows)]
@@ -121,7 +182,7 @@ mod imp {
     use std::sync::Mutex;
 
     use serde_json::{json, Value};
-    use windows::core::{Interface, BSTR, PWSTR};
+    use windows::core::{w, Interface, BSTR, HSTRING, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, LPARAM};
     use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
@@ -130,11 +191,12 @@ mod imp {
     };
     use windows::Win32::UI::Accessibility::*;
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow,
-        ShowWindow, SW_RESTORE,
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
+        SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOWNORMAL,
     };
+    use windows::Win32::UI::Shell::ShellExecuteW;
 
-    use super::{clip, RefArgs, TypeArgs, WindowArgs, MAX_TEXT};
+    use super::{clip, RefArgs, SelectArgs, TypeArgs, WindowArgs, MAX_TEXT};
     use crate::ai::types::PermissionLevel;
     use crate::tools::{parse, ToolError, ToolOutput};
 
@@ -227,6 +289,9 @@ mod imp {
         }
         let mut pid = 0u32;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if unsafe { IsHungAppWindow(hwnd) }.as_bool() {
+            return Err(ToolError::new("app_not_responding", "That app isn't responding right now. Wait for it or close it."));
+        }
         if pid == std::process::id() {
             return Err(ToolError::denied("The assistant can't control its own window."));
         }
@@ -289,6 +354,100 @@ mod imp {
         unsafe { p.CurrentValue() }.ok().map(|b| b.to_string())
     }
 
+    /// Visible text of an editable/document element: Value pattern, else Text pattern.
+    fn text(e: &IUIAutomationElement, max: i32) -> Option<String> {
+        value(e).filter(|v| !v.is_empty()).or_else(|| {
+            let p: IUIAutomationTextPattern = pattern(e, UIA_TextPatternId).ok()?;
+            unsafe { p.DocumentRange().ok()?.GetText(max).ok() }.map(|b| b.to_string())
+        })
+    }
+
+    /// Start-menu shortcuts (all users and current user): (name, path).
+    pub fn installed_apps() -> Vec<(String, String)> {
+        let mut stack: Vec<(std::path::PathBuf, u8)> = Vec::new();
+        for var in ["ProgramData", "APPDATA"] {
+            if let Ok(base) = std::env::var(var) {
+                stack.push((std::path::PathBuf::from(base).join(r"Microsoft\Windows\Start Menu\Programs"), 0));
+            }
+        }
+        let mut out: Vec<(String, String)> = Vec::new();
+        while let Some((dir, depth)) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() && depth < 4 {
+                    stack.push((p, depth + 1));
+                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")) {
+                    let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    if name.to_lowercase().contains("uninstall") || out.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+                        continue;
+                    }
+                    out.push((name, p.display().to_string()));
+                }
+            }
+        }
+        out.sort_by_key(|(n, _)| n.to_lowercase());
+        out.truncate(500);
+        out
+    }
+
+    pub fn open_shortcut(path: &std::path::Path) -> Result<(), ToolError> {
+        let r = unsafe {
+            ShellExecuteW(
+                HWND(std::ptr::null_mut()),
+                w!("open"),
+                &HSTRING::from(path.as_os_str()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecute reports success with a value greater than 32.
+        let code = r.0 as isize;
+        if code <= 32 {
+            return Err(ToolError::new("desktop_error", format!("Windows couldn't open {} (code {code}).", path.display())));
+        }
+        Ok(())
+    }
+
+    /// Picks `option` inside a list or combo box: expands it, then selects the named item.
+    fn select_option(a: &IUIAutomation, e: &IUIAutomationElement, option: &str) -> Result<&'static str, ToolError> {
+        if let Ok(p) = pattern::<IUIAutomationExpandCollapsePattern>(e, UIA_ExpandCollapsePatternId) {
+            let _ = unsafe { p.Expand() };
+        }
+        let want = option.trim().to_lowercase();
+        let items: Vec<IUIAutomationElement> = unsafe {
+            let cond = a.CreateTrueCondition().map_err(err)?;
+            let arr = e.FindAll(TreeScope_Descendants, &cond).map_err(err)?;
+            (0..arr.Length().map_err(err)?).filter_map(|i| arr.GetElement(i).ok()).collect()
+        };
+        let item = items
+            .iter()
+            .find(|i| name(i).trim().to_lowercase() == want)
+            .ok_or_else(|| ToolError::not_found(format!("No option named “{}” was found in that control.", clip(option, 80))))?;
+        let done = if let Ok(p) = pattern::<IUIAutomationSelectionItemPattern>(item, UIA_SelectionItemPatternId) {
+            unsafe { p.Select() }.map_err(err)?;
+            "selected"
+        } else if let Ok(p) = pattern::<IUIAutomationInvokePattern>(item, UIA_InvokePatternId) {
+            unsafe { p.Invoke() }.map_err(err)?;
+            "invoked"
+        } else {
+            return Err(unsupported());
+        };
+        if let Ok(p) = pattern::<IUIAutomationExpandCollapsePattern>(e, UIA_ExpandCollapsePatternId) {
+            let _ = unsafe { p.Collapse() };
+        }
+        Ok(done)
+    }
+
+    fn unsupported() -> ToolError {
+        ToolError::new(
+            "unsupported_control",
+            "That control doesn't support UI Automation actions (likely custom-drawn UI). Nothing was done. \
+             Try another element or ask the user to do this step.",
+        )
+    }
+
     /// Looks up a ref and checks the element is still the one that was read.
     fn resolve(a: &IUIAutomation, r: &str) -> Result<(Win, IUIAutomationElement), ToolError> {
         let (hwnd, idx, want_name, want_type) = {
@@ -344,6 +503,12 @@ mod imp {
                 let (w, e) = resolve(&uia()?, &a.element)?;
                 Ok(Some(format!("Type “{}” into {}", clip(&a.text, 80), describe(&w, &e))))
             }
+            "app_select_option" => {
+                let a: SelectArgs = parse(args)?;
+                let _com = Com::init()?;
+                let (w, e) = resolve(&uia()?, &a.element)?;
+                Ok(Some(format!("Choose “{}” in {}", clip(&a.option, 80), describe(&w, &e))))
+            }
             _ => Ok(None),
         }
     }
@@ -395,8 +560,9 @@ mod imp {
                     if is_password(e) {
                         item["password"] = json!(true);
                     } else if editable {
-                        if let Some(v) = value(e) {
-                            item["value"] = json!(clip(&v, 500));
+                        let limit: usize = if t == UIA_DocumentControlTypeId.0 { 4000 } else { 500 };
+                        if let Some(v) = text(e, limit as i32) {
+                            item["value"] = json!(clip(&v, limit));
                         }
                     }
                     if !flag(unsafe { e.CurrentIsEnabled() }) {
@@ -435,11 +601,39 @@ mod imp {
                     } else if let Ok(p) = pattern::<IUIAutomationExpandCollapsePattern>(&e, UIA_ExpandCollapsePatternId) {
                         p.Expand().map_err(err)?;
                         "expanded"
+                    } else if let Ok(p) = pattern::<IUIAutomationLegacyIAccessiblePattern>(&e, UIA_LegacyIAccessiblePatternId) {
+                        // Older or custom UIs often expose only MSAA; use its default action.
+                        p.DoDefaultAction().map_err(|_| unsupported())?;
+                        "default action"
                     } else {
-                        return Err(ToolError::invalid("That element can't be clicked through UI Automation."));
+                        return Err(unsupported());
                     }
                 };
                 Ok(ToolOutput { content: json!({ "action": action, "element": what }), summary: format!("{action}: {what}"), file: None })
+            }
+            "app_list_installed" => {
+                let apps: Vec<Value> = installed_apps().into_iter().map(|(n, p)| json!({ "name": n, "shortcut": p })).collect();
+                Ok(ToolOutput {
+                    summary: format!("{} installed apps", apps.len()),
+                    content: json!({
+                        "apps": apps,
+                        "note": "Only apps in the user's allowed-apps list can be launched. Ask the user to add a shortcut path there if needed.",
+                    }),
+                    file: None,
+                })
+            }
+            "app_select_option" => {
+                let a: SelectArgs = parse(args)?;
+                let _com = Com::init()?;
+                let auto = uia()?;
+                let (w, e) = resolve(&auto, &a.element)?;
+                let what = describe(&w, &e);
+                let action = select_option(&auto, &e, &a.option)?;
+                Ok(ToolOutput {
+                    content: json!({ "action": action, "option": a.option, "element": what }),
+                    summary: format!("Chose “{}” in {what}", clip(&a.option, 60)),
+                    file: None,
+                })
             }
             "app_type" => {
                 let a: TypeArgs = parse(args)?;
@@ -458,7 +652,10 @@ mod imp {
                     p.SetValue(&BSTR::from(a.text.as_str())).map_err(err)?;
                 }
                 let what = describe(&w, &e);
-                Ok(ToolOutput { content: json!({ "typed": true, "element": what }), summary: format!("Typed into {what}"), file: None })
+                // Read the value back: some apps accept SetValue but reformat or ignore it.
+                let verified = value(&e).is_some_and(|v| v == a.text);
+                let summary = if verified { format!("Typed into {what}") } else { format!("Typed into {what} (couldn't confirm the new value)") };
+                Ok(ToolOutput { content: json!({ "typed": true, "value_confirmed": verified, "element": what }), summary, file: None })
             }
             other => Err(ToolError::invalid(format!("Unknown tool `{other}`."))),
         }

@@ -65,6 +65,13 @@ async function ensurePage() {
   browser ??= await launch();
   // Service workers could fetch outside the request router, so they're blocked.
   context = await browser.newContext({ acceptDownloads: true, serviceWorkers: "block", viewport: { width: 1280, height: 900 } });
+  // `serviceWorkers: "block"` doesn't stop registration in every browser channel; refuse it in every frame too.
+  await context.addInitScript(() => {
+    if (typeof ServiceWorkerContainer !== "undefined") {
+      ServiceWorkerContainer.prototype.register = () =>
+        Promise.reject(new DOMException("Service workers are disabled in this browser.", "SecurityError"));
+    }
+  });
   context.setDefaultTimeout(ACTION_TIMEOUT);
   context.setDefaultNavigationTimeout(NAV_TIMEOUT);
   // Every HTTP(S) request — navigations, scripts, fetch/XHR — passes the policy.
@@ -115,9 +122,31 @@ async function ensurePage() {
   });
   await context.routeWebSocket(/.*/, async (ws) => {
     const verdict = await policy.check(ws.url());
-    if (verdict.ok) return ws.connectToServer();
-    blocked.push({ url: ws.url().slice(0, 200), reason: verdict.reason });
-    ws.close({ code: 1008, reason: "blocked" });
+    if (!verdict.ok) {
+      blocked.push({ url: ws.url().slice(0, 200), reason: verdict.reason });
+      return ws.close({ code: 1008, reason: "blocked" });
+    }
+    if (typeof globalThis.WebSocket !== "function") {
+      // Node < 22 has no WebSocket client; the browser connects (resolved by the browser, not guarded).
+      return ws.connectToServer();
+    }
+    // Connect from this process so the guarded resolver applies at connect time (no DNS rebinding).
+    let server;
+    try {
+      server = new WebSocket(ws.url());
+    } catch (e) {
+      return ws.close({ code: 1011, reason: "connect failed" }).catch(() => {});
+    }
+    server.binaryType = "arraybuffer";
+    const pending = [];
+    server.onopen = () => {
+      for (const m of pending.splice(0)) server.send(m);
+    };
+    server.onmessage = (e) => ws.send(typeof e.data === "string" ? e.data : Buffer.from(e.data));
+    server.onerror = () => ws.close({ code: 1011, reason: "upstream error" }).catch(() => {});
+    server.onclose = (e) => ws.close({ code: e.code === 1000 || e.code >= 3000 ? e.code : 1000, reason: e.reason }).catch(() => {});
+    ws.onMessage((m) => (server.readyState === 1 ? server.send(m) : pending.push(m)));
+    ws.onClose(() => server.close());
   });
   page = await context.newPage();
   log("session started");

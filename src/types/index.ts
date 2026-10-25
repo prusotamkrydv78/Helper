@@ -180,4 +180,66 @@ export interface AiStatus {
   keyHint: string | null;
 }
 
-export type View ="chat" | "tasks" | "automations" | "history" | "settings";
+export type View ="chat" | "tasks" | "workflows" | "automations" | "history" | "settings";
+
+// ---- Workflows (persisted by the Rust backend) -----------------------------
+export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed" | "cancelled";
+export type WorkflowStepStatus = "pending" | "running" | "completed" | "failed" | "skipped" | "cancelled" | "interrupted";
+
+export interface WorkflowStep {
+  id: ID;
+  instruction: string;
+  status: WorkflowStepStatus;
+  attempts: number;
+  /** The assistant's final reply for this step (without the result marker). */
+  result?: string;
+  error?: string;
+  startedAt?: ISODate;
+  finishedAt?: ISODate;
+}
+
+export type ScheduleKind = "once" | "daily" | "weekly" | "interval";
+
+export interface Schedule {
+  id: ID;
+  /** The workflow used as a template; every run is a fresh copy of its steps. */
+  workflowId: ID;
+  kind: ScheduleKind;
+  /** Local wall-clock time "HH:MM" (once, daily, weekly). */
+  time: string;
+  /** "YYYY-MM-DD" (once). */
+  date?: string;
+  /** 0 = Sunday … 6 = Saturday (weekly). */
+  weekdays?: number[];
+  /** Minutes between runs (interval), at least 15. */
+  intervalMinutes?: number;
+  /** What to do when a run was due while the app was closed or asleep. */
+  missedPolicy: "skip" | "run_once";
+  enabled: boolean;
+  /** IANA time zone the schedule was created in (times follow the computer's current zone). */
+  timeZone: string;
+  nextRunAt: ISODate | null;
+  lastRunAt?: ISODate;
+  /** The workflow run started last time (its live status is shown). */
+  lastRunWorkflowId?: ID;
+  /** Outcome when no run was started (missed, skipped, error). */
+  lastNote?: string;
+  createdAt: ISODate;
+  updatedAt: ISODate;
+}
+
+export interface Workflow {
+  id: ID;
+  title: string;
+  goal: string;
+  status: WorkflowStatus;
+  steps: WorkflowStep[];
+  /** Every step runs as a turn in this conversation (tools, approvals and Stop work there). */
+  conversationId: ID;
+  /** Set while running: pause once the current step ends. */
+  pauseRequested?: boolean;
+  /** Set on runs started by a schedule (a fresh copy of the scheduled workflow). */
+  scheduleId?: ID;
+  createdAt: ISODate;
+  updatedAt: ISODate;
+}

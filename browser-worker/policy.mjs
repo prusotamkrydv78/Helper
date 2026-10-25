@@ -6,6 +6,9 @@ import dnsCallback from "node:dns";
 import dns from "node:dns/promises";
 import net from "node:net";
 
+// Unguarded resolver for the policy check itself (guardDnsLookup replaces the shared ones).
+const rawLookup = dns.lookup.bind(dns);
+
 const BLOCKED_SUFFIXES = [".localhost", ".local", ".internal", ".lan", ".home.arpa", ".intranet", ".corp"];
 const BLOCKED_HOSTS = new Set(["localhost", "metadata.google.internal", "metadata"]);
 
@@ -96,7 +99,7 @@ export function createPolicy({ allowHosts = [] } = {}) {
     if (hit && Date.now() - hit.at < 60_000) return hit;
     let result;
     try {
-      const addrs = await dns.lookup(host, { all: true });
+      const addrs = await rawLookup(host, { all: true });
       const bad = addrs.find((a) => !isPublicIp(a.address));
       result = bad
         ? { ok: false, reason: `${host} resolves to a private address (${bad.address}).` }
@@ -115,7 +118,7 @@ export function createPolicy({ allowHosts = [] } = {}) {
   }
 
   /**
-   * Enforces the address rules at connect time: replaces dns.lookup for this
+   * Enforces the address rules at connect time: replaces dns.lookup (callback and promise APIs) for this
    * process so a host can't pass the check with a public address and then
    * resolve to a private one when Playwright fetches it (DNS rebinding).
    */
@@ -137,6 +140,20 @@ export function createPolicy({ allowHosts = [] } = {}) {
       });
     };
     dnsCallback.lookup = guarded;
+    // Playwright resolves through the promise API (dns.promises.lookup).
+    const promises = dnsCallback.promises;
+    const originalPromise = promises.lookup;
+    promises.lookup = async function (hostname, options) {
+      const opts = typeof options === "number" ? { family: options } : { ...(options || {}) };
+      const addrs = await originalPromise.call(promises, hostname, { ...opts, all: true });
+      const ok = hostAllowed(hostname) ? addrs : addrs.filter((a) => isPublicIp(a.address));
+      if (!ok.length) {
+        const e = new Error(`${hostname} resolves to a private address.`);
+        e.code = "EAI_FAIL";
+        throw e;
+      }
+      return opts.all ? ok : ok[0];
+    };
   }
 
   return { check, guardDnsLookup };

@@ -42,8 +42,33 @@ fn locate_script() -> Option<PathBuf> {
         let p = PathBuf::from(p);
         return p.is_file().then_some(p);
     }
-    let dev = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../browser-worker/worker.mjs"));
-    dev.is_file().then_some(dev)
+    // Installed app: bundled next to the executable (tauri.conf.json `bundle.resources`).
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
+        let bundled = dir.join("browser-worker").join("worker.mjs");
+        if bundled.is_file() {
+            return Some(bundled);
+        }
+    }
+    // Development: the source tree. Release builds never fall back to it.
+    if cfg!(debug_assertions) {
+        let dev = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../browser-worker/worker.mjs"));
+        return dev.is_file().then_some(dev);
+    }
+    None
+}
+
+/// Node runtime: `AA_NODE_PATH`, else the one bundled beside the worker script, else `node` on PATH.
+fn locate_node(script: Option<&std::path::Path>) -> String {
+    if let Ok(p) = std::env::var("AA_NODE_PATH") {
+        return p;
+    }
+    let exe = if cfg!(windows) { "node.exe" } else { "node" };
+    script
+        .and_then(|s| s.parent())
+        .map(|d| d.join(exe))
+        .filter(|p| p.is_file())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "node".into())
 }
 
 impl BrowserWorker {
@@ -54,7 +79,7 @@ impl BrowserWorker {
             None => log::warn!("browser worker script not found; browser tools disabled"),
         }
         Self {
-            node: std::env::var("AA_NODE_PATH").unwrap_or_else(|_| "node".into()),
+            node: locate_node(script.as_deref()),
             script,
             proc: Mutex::new(None),
             last_used: StdMutex::new(Instant::now()),

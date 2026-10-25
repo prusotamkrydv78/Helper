@@ -32,6 +32,9 @@ export interface TriggerState {
   processes: string[];
   battery: { present: boolean; percent?: number | null; on_ac_power?: boolean } | null;
   drives: { drive: string; free_gb: number }[];
+  memory_percent?: number | null;
+  online?: boolean;
+  locked?: boolean;
 }
 
 /** Proactive triggers (Rust backend) and the system state they're checked against. */

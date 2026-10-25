@@ -27,6 +27,30 @@ pub async fn voice_listen(state: State<'_, AppState>) -> Result<String, AppError
     r
 }
 
+/// Hands-free: listens repeatedly until an utterance starts with (or contains) `phrase`, then
+/// returns what was said after it (possibly empty). Cancel with voice_cancel / mute.
+#[tauri::command]
+pub async fn voice_wait_for_phrase(state: State<'_, AppState>, phrase: String) -> Result<String, AppError> {
+    let phrase = phrase.trim().to_lowercase();
+    if phrase.chars().count() < 3 {
+        return Err(AppError::invalid("The wake phrase needs at least 3 characters."));
+    }
+    loop {
+        let heard = match voice_listen(state.clone()).await {
+            Ok(t) => t,
+            // Silence is normal while waiting; keep listening.
+            Err(e) if e.message.contains("Didn't hear") || e.message.contains("wasn't recognized") => continue,
+            Err(e) => return Err(e),
+        };
+        let lower = heard.to_lowercase();
+        if let Some(pos) = lower.find(&phrase) {
+            // Lower-casing can change byte lengths; fall back to the whole utterance if the slice isn't valid.
+            let rest = heard.get(pos + phrase.len()..).unwrap_or("");
+            return Ok(rest.trim_start_matches([',', '.', '!', ' ']).trim().to_owned());
+        }
+    }
+}
+
 #[tauri::command]
 pub fn voice_cancel(state: State<'_, AppState>) {
     if let Some(f) = state.voice.cancel.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -70,6 +94,11 @@ mod imp {
         let inited = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
         let result = (|| -> Result<String, AppError> {
             let rec = SpeechRecognizer::new().map_err(map)?;
+            // Voice activity detection: stop after ~1.2 s of silence; give up if nothing is said for 8 s.
+            if let Ok(t) = rec.Timeouts() {
+                let _ = t.SetEndSilenceTimeout(windows::Foundation::TimeSpan { Duration: 12_000_000 });
+                let _ = t.SetInitialSilenceTimeout(windows::Foundation::TimeSpan { Duration: 80_000_000 });
+            }
             let compiled = rec.CompileConstraintsAsync().map_err(map)?.get().map_err(map)?;
             if compiled.Status().map_err(map)? != SpeechRecognitionResultStatus::Success {
                 return Err(AppError::invalid("Windows couldn't prepare speech recognition (no speech language installed?)."));

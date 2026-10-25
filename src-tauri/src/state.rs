@@ -21,6 +21,7 @@ pub struct AppState {
     pub memory: MemoryStore,
     pub audit: AuditLog,
     pub voice: crate::voice::VoiceState,
+    pub library: Arc<crate::library::Library>,
     /// Opt-in clipboard history (memory only).
     pub clipboard: Arc<crate::clipboard::ClipHistory>,
     /// Microsoft Graph (Outlook mail and calendar).
@@ -48,6 +49,7 @@ impl AppState {
             memory: MemoryStore::load(config_dir),
             audit: AuditLog::new(config_dir),
             voice: Default::default(),
+            library: Arc::new(crate::library::Library::default()),
             clipboard: Arc::new(crate::clipboard::ClipHistory::default()),
             graph: GraphClient::load(config_dir),
             google: GoogleClient::load(config_dir),

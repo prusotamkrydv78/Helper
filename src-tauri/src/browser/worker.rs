@@ -35,6 +35,8 @@ pub struct BrowserWorker {
     script: Option<PathBuf>,
     proc: Mutex<Option<Proc>>,
     last_used: StdMutex<Instant>,
+    /// Folder for a persistent browser profile (logins kept); None = clean sessions.
+    profile: StdMutex<Option<std::path::PathBuf>>,
 }
 
 fn locate_script() -> Option<PathBuf> {
@@ -83,7 +85,41 @@ impl BrowserWorker {
             script,
             proc: Mutex::new(None),
             last_used: StdMutex::new(Instant::now()),
+            profile: StdMutex::new(None),
         }
+    }
+
+    /// Uses (or stops using) a persistent profile. Takes effect with the next session, so the
+    /// current one is closed.
+    pub async fn set_profile(&self, dir: Option<std::path::PathBuf>) {
+        *self.profile.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+        self.shutdown().await;
+    }
+
+    /// Closes the browser session now (used by Stop all and profile changes).
+    pub async fn shutdown(&self) -> bool {
+        let mut guard = match tokio::time::timeout(Duration::from_secs(3), self.proc.lock()).await {
+            Ok(g) => g,
+            // A call holds the lock; Stop already cancelled it, the call restarts the worker itself.
+            Err(_) => return false,
+        };
+        if let Some(mut p) = guard.take() {
+            drop(p.stdin);
+            let _ = tokio::time::timeout(Duration::from_secs(3), p.child.wait()).await;
+            let _ = p.child.start_kill();
+        }
+        true
+    }
+
+    /// What diagnostics can say without starting anything.
+    pub fn diagnostics(&self) -> serde_json::Value {
+        let node_found = std::path::Path::new(&self.node).is_file();
+        serde_json::json!({
+            "script": self.script.as_ref().map(|s| s.display().to_string()),
+            "node": self.node,
+            "nodeFound": node_found,
+            "profile": self.profile.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|p| p.display().to_string()),
+        })
     }
 
     /// Whether browser tools can be offered at all.
@@ -99,6 +135,9 @@ impl BrowserWorker {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(dir) = self.profile.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            cmd.env("AA_BROWSER_PROFILE", dir);
+        }
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flash
         let mut child = cmd.spawn().map_err(|e| {

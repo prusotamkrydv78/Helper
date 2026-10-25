@@ -4,6 +4,9 @@ import {
   BellRing,
   Clipboard,
   FileSearch,
+  Sparkles,
+  Stethoscope,
+  Sunrise,
   LayoutGrid,
   FolderTree,
   Keyboard,
@@ -29,7 +32,7 @@ import {
 import type { PermissionLevel, Settings } from "../types";
 import { useStore } from "../store/AppStore";
 import { DEFAULT_PERMISSIONS } from "../store/defaults";
-import { ActivityLogSection, BackgroundSection, ClipboardSection, DataSection, DocumentsSection, FileRulesSection, GoogleSection, WorkspacesSection, ShortcutsSection, VoiceSection, MemorySection, MicrosoftSection } from "./AssistantSettings";
+import { ActivityLogSection, BackgroundSection, ClipboardSection, DataSection, FileRulesSection, KnowledgeLibrarySection, SkillsSection, BriefingSection, DiagnosticsSection, GoogleSection, WorkspacesSection, ShortcutsSection, VoiceSection, MemorySection, MicrosoftSection } from "./AssistantSettings";
 import { toBackendError } from "../services/tauri/tauriAi";
 import { Page, PageHeader } from "../components/layout/Page";
 import { Button } from "../components/ui/Button";
@@ -50,7 +53,10 @@ const SECTIONS = [
   { id: "clipboard", label: "Clipboard", icon: Clipboard },
   { id: "rules", label: "File rules", icon: FolderTree },
   { id: "workspaces", label: "Workspaces", icon: LayoutGrid },
-  { id: "documents", label: "Documents", icon: FileSearch },
+  { id: "documents", label: "Knowledge library", icon: FileSearch },
+  { id: "skills", label: "Skills", icon: Sparkles },
+  { id: "briefing", label: "Daily briefing", icon: Sunrise },
+  { id: "diagnostics", label: "Diagnostics", icon: Stethoscope },
   { id: "activity", label: "Activity log", icon: ScrollText },
   { id: "privacy", label: "Privacy & execution", icon: Shield },
   { id: "data", label: "Data", icon: Database },
@@ -198,7 +204,13 @@ export function SettingsPage() {
 
           <WorkspacesSection />
 
-          <DocumentsSection />
+          <KnowledgeLibrarySection />
+
+          <SkillsSection />
+
+          <BriefingSection />
+
+          <DiagnosticsSection />
 
           <ActivityLogSection />
 

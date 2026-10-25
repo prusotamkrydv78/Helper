@@ -11,6 +11,7 @@ import {
 } from "react";
 import { backend } from "../services";
 import type {
+  StepEvidence,
   AgentConnection,
   AiStatus,
   Attachment,
@@ -27,7 +28,7 @@ import { load, remove, save } from "../lib/storage";
 import { nowISO, titleFromPrompt, uid } from "../lib/utils";
 import { DEFAULT_PERMISSIONS, DEFAULT_SETTINGS } from "./defaults";
 import { featureService } from "../services/tauri/assistant";
-import { speak, stopSpeaking } from "../lib/speech";
+import { conversation, speak, stopSpeaking } from "../lib/speech";
 import { isTaskActive, reducer, type AppState, type UIState } from "./reducer";
 
 // ---------------------------------------------------------------------------
@@ -215,6 +216,8 @@ export interface TurnResult {
   error?: string;
   /** False when the reply came from the demo mock (no real tools ran). */
   live: boolean;
+  /** Tool calls of this turn and how they ended (evidence for workflows). */
+  tools: StepEvidence[];
 }
 
 interface StoreValue {
@@ -368,6 +371,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     let requestId: string | undefined;
     let liveTaskId: ID | null = null;
     const stepStatus = new Map<string, StepStatus>();
+    const evidence = new Map<string, StepEvidence>();
     const ensureLiveTask = (): ID => {
       if (liveTaskId) return liveTaskId;
       const lastUser = [...history].reverse().find((m) => m.role === "user")?.content ?? "";
@@ -426,6 +430,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
             case "tool_call": {
               const taskId = ensureLiveTask();
               stepStatus.set(e.callId, "pending");
+              evidence.set(e.callId, { tool: e.name, title: e.title, status: "pending", readOnly: e.readOnly });
               dispatch({
                 type: "add_step",
                 taskId,
@@ -446,6 +451,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
               if (!liveTaskId) break;
               const wasRunning = stepStatus.get(e.callId) === "running";
               stepStatus.set(e.callId, e.status);
+              const ev = evidence.get(e.callId);
+              if (ev) evidence.set(e.callId, { ...ev, status: e.status, summary: e.status === "completed" ? (e.summary ?? undefined) : (e.error ?? ev.summary) });
               const terminal = e.status !== "running" && e.status !== "awaiting_approval";
               dispatch({
                 type: "patch_step",
@@ -522,13 +529,15 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       })
       .then(() => {
         const st = stateRef.current.settings;
-        if (finalStatus === "complete" && st.speakReplies && replyText.trim()) speak(replyText, st.voiceName, st.speechRate);
+        if (finalStatus === "complete" && st.speakReplies && !conversation.active && replyText.trim()) void speak(replyText, st.voiceName, st.speechRate);
       })
       .then(() => ({
         status: finalStatus === "stopped" ? "stopped" : finalStatus === "error" ? "error" : "complete",
         content: replyText,
         error: finalError,
         live,
+        // Calls that never finished didn't run (or were interrupted); record that honestly.
+        tools: [...evidence.values()].map((t) => (t.status === "pending" || t.status === "running" || t.status === "awaiting_approval" ? { ...t, status: "cancelled" } : t)),
       }));
   }, []);
 

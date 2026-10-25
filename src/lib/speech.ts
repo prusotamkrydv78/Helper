@@ -15,14 +15,22 @@ function speakable(text: string): string {
     .slice(0, 4000);
 }
 
-export function speak(text: string, voiceName: string, rate: number) {
-  if (typeof speechSynthesis === "undefined") return;
+/** True while a hands-free conversation runs; it speaks replies itself. */
+export const conversation = { active: false };
+
+/** Speaks text; resolves when finished or interrupted. */
+export function speak(text: string, voiceName: string, rate: number): Promise<void> {
+  if (typeof speechSynthesis === "undefined") return Promise.resolve();
   stopSpeaking();
   const u = new SpeechSynthesisUtterance(speakable(text));
   const v = voices().find((x) => x.name === voiceName);
   if (v) u.voice = v;
   u.rate = Math.min(2, Math.max(0.5, rate || 1));
-  speechSynthesis.speak(u);
+  return new Promise((resolve) => {
+    u.onend = () => resolve();
+    u.onerror = () => resolve();
+    speechSynthesis.speak(u);
+  });
 }
 
 /** Interrupts any reply being spoken. */

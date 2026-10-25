@@ -15,6 +15,8 @@ import { useToast } from "./components/ui/overlays";
 import { WorkflowProvider } from "./store/WorkflowStore";
 import { NotificationProvider } from "./store/NotificationStore";
 import { NotificationsPage } from "./pages/NotificationsPage";
+import { RunningPage } from "./pages/RunningPage";
+import { VoiceController } from "./components/voice/VoiceController";
 import { ScheduleProvider } from "./store/ScheduleStore";
 import { AutomationsPage } from "./pages/AutomationsPage";
 import { HistoryPage } from "./pages/HistoryPage";
@@ -54,6 +56,7 @@ function Shell() {
       .catch(() => {});
   }, [state.settings.globalShortcuts, state.settings.shortcuts]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => void featureService.clipSetEnabled(state.settings.clipboardHistory).catch(() => {}), [state.settings.clipboardHistory]);
+  useEffect(() => void featureService.browserSetPersistent(state.settings.browserPersistent).catch(() => {}), [state.settings.browserPersistent]);
   const shortcutRef = useRef<(a: string) => void>(() => {});
   shortcutRef.current = (action: string) => {
     if (action === "summon") {
@@ -124,12 +127,14 @@ function Shell() {
       <main className="relative min-w-0 flex-1">
         {state.ui.view === "home" && <CommandCenterPage />}
         {state.ui.view === "notifications" && <NotificationsPage />}
+        {state.ui.view === "running" && <RunningPage />}
         {state.ui.view === "chat" && <ChatView composerRef={composerRef} />}
         {state.ui.view === "tasks" && <TasksPage />}
         {state.ui.view === "workflows" && <WorkflowsPage />}
         {state.ui.view === "automations" && <AutomationsPage />}
         {state.ui.view === "history" && <HistoryPage />}
         {state.ui.view === "settings" && <SettingsPage />}
+        <VoiceController />
       </main>
     </div>
   );

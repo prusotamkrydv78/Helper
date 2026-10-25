@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  Activity,
   Bell,
   LayoutDashboard,
   ListOrdered,
@@ -30,6 +31,7 @@ import { Kbd, Skeleton } from "../ui/primitives";
 
 const NAV: { view: View; label: string; icon: typeof MessageSquare }[] = [
   { view: "home", label: "Command Center", icon: LayoutDashboard },
+  { view: "running", label: "Running", icon: Activity },
   { view: "notifications", label: "Notifications", icon: Bell },
   { view: "chat", label: "Chats", icon: MessageSquare },
   { view: "tasks", label: "Tasks", icon: ListChecks },

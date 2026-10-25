@@ -52,7 +52,9 @@ fn offered_tools(state: &AppState, guard: &PathGuard, perms: ToolPermissions, ha
     tools::TOOLS
         .iter()
         .filter(|t| match t.kind {
-            ToolKind::Read | ToolKind::Write => guard.has_roots() && level(perms, t.kind) != PermissionLevel::Deny,
+            ToolKind::Read | ToolKind::Write => {
+                guard.has_roots() && level(perms, t.kind) != PermissionLevel::Deny && (t.name != "library_search" || state.library.has_content())
+            }
             ToolKind::Browser if t.name == "browser_download" => {
                 browser_ok && guard.has_roots() && perms.write != PermissionLevel::Deny
             }
@@ -95,6 +97,9 @@ pub async fn run(
     let mut prompt = system_prompt(req, &guard, perms, browsing, desktop);
     if let Some(mem) = state.memory.prompt_section() {
         prompt.push_str(&mem);
+    }
+    if let Some(skills) = crate::workflows::skills_prompt() {
+        prompt.push_str(&skills);
     }
     let mut messages = vec![json!({ "role": "system", "content": prompt })];
     messages.extend(history.iter().map(|m| json!({ "role": m.role.as_str(), "content": m.content })));
@@ -216,7 +221,11 @@ fn system_prompt(req: &ChatRequest, guard: &PathGuard, perms: ToolPermissions, b
         }
     }
     s.push_str(
-        "\n\nWorking method: for multi-step goals, briefly plan, then act one step at a time. After each action, \
+        "\n\nOperating apps: work in a loop — inspect (app_get_ui_tree, or app_screenshot_analyze for custom UIs), \
+         plan ONE action, do it, then inspect again and check the result before the next action. Refs and \
+         screenshots expire after every action. If a tool reports stale_screenshot, focus_changed, point_covered, \
+         unsupported_control or app_not_responding, re-inspect or explain; never repeat an action blindly.\
+         \n\nWorking method: for multi-step goals, briefly plan, then act one step at a time. After each action, \
          verify the outcome (re-read the page, window, file or status) before relying on it. If something fails, \
          try a reasonable alternative once; if you're still blocked (missing permission, unsupported control, \
          ambiguous choice, needed credentials), stop and ask the user a specific question instead of guessing. \
@@ -477,6 +486,11 @@ async fn run_one(
             }
             r = desktop::analyze_screenshot(state, req.model.as_deref(), &req.request_id, &args, cancel) => r,
         }
+    } else if spec.name == "library_search" {
+        let lib = Arc::clone(&state.library);
+        tauri::async_runtime::spawn_blocking(move || crate::library::tool(&lib, &args))
+            .await
+            .unwrap_or_else(|e| Err(ToolError::new("internal_error", e.to_string())))
     } else if spec.kind == ToolKind::Memory {
         match spec.name {
             "memory_save" => {

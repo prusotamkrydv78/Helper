@@ -163,6 +163,20 @@ export interface Settings {
   speakReplies: boolean;
   voiceName: string;
   speechRate: number;
+  /** Hands-free conversation mode (listen → reply → listen again). */
+  voiceConversation: boolean;
+  /** Optional phrase that must start a request in hands-free mode (e.g. "Hey Jarvis"). */
+  wakePhrase: string;
+  /** User opt-in for one-off screen analysis (each capture is still confirmed). */
+  screenAnalysis: boolean;
+  /** Keep browser logins between sessions (persistent browser profile). */
+  browserPersistent: boolean;
+  /** Pause workflows on low battery, high memory, no network or a locked session. */
+  resourceAware: boolean;
+  briefingEnabled: boolean;
+  /** "HH:MM" local time. */
+  briefingTime: string;
+  briefingHours: number;
   // Appearance
   theme: ThemePref;
   fontSize: FontSize;
@@ -199,11 +213,20 @@ export interface AiStatus {
   keyHint: string | null;
 }
 
-export type View ="home" | "notifications" | "chat" | "tasks" | "workflows" | "automations" | "history" | "settings";
+export type View ="home" | "running" | "notifications" | "chat" | "tasks" | "workflows" | "automations" | "history" | "settings";
 
 // ---- Workflows (persisted by the Rust backend) -----------------------------
 export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type WorkflowStepStatus = "pending" | "running" | "completed" | "failed" | "skipped" | "cancelled" | "interrupted";
+
+export interface StepEvidence {
+  tool: string;
+  title: string;
+  status: string;
+  summary?: string;
+  /** Read-only tools have no side effects. */
+  readOnly: boolean;
+}
 
 export interface WorkflowStep {
   id: ID;
@@ -212,6 +235,12 @@ export interface WorkflowStep {
   attempts: number;
   /** The assistant's final reply for this step (without the result marker). */
   result?: string;
+  /** 1-based steps this one needs; unset = all earlier steps. Written as "[after 1, 2]" in step text. */
+  dependsOn?: number[];
+  /** What the step's turn actually did (tool calls with their real outcome). */
+  evidence?: StepEvidence[];
+  /** Set after one automatic retry (only done when nothing with side effects ran). */
+  autoRetried?: boolean;
   /** Verified output the step produced for later steps (from a "STEP OUTPUT:" block of a successful step). */
   output?: string;
   error?: string;
@@ -264,6 +293,8 @@ export interface Workflow {
   pauseRequested?: boolean;
   /** Set on runs started by a schedule (a fresh copy of the scheduled workflow). */
   scheduleId?: ID;
+  /** Why the engine paused it (e.g. low battery). */
+  pausedReason?: string;
   /** Reusable template: shown under Templates; runs are fresh copies. */
   template?: boolean;
   createdAt: ISODate;

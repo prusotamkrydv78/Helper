@@ -353,13 +353,13 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "memory_save",
         title: "Remember",
-        description: "Save a short long-term note (user preference, project context, ongoing task) for future conversations. Only for things the user would want remembered; never secrets or passwords. Needs the user's approval.",
+        description: "Save a short long-term note for future conversations: a preference, a correction the user explicitly gave (e.g. "no, my manager is Sam"), a reusable instruction, a preferred app, project context or an ongoing task. Only what the user stated or asked you to remember; never secrets or sensitive personal details. Needs the user's approval.",
         kind: ToolKind::Memory,
         parameters: || json!({
             "type": "object",
             "properties": {
                 "text": { "type": "string", "description": "The note, at most 500 characters." },
-                "category": { "type": "string", "enum": ["preference", "project", "task", "other"] }
+                "category": { "type": "string", "enum": ["preference", "correction", "instruction", "app", "project", "task", "other"] }
             },
             "required": ["text", "category"],
             "additionalProperties": false
@@ -892,6 +892,18 @@ pub const TOOLS: &[ToolSpec] = &[
         }),
     },
     ToolSpec {
+        name: "library_search",
+        title: "Knowledge library",
+        description: "Answer from the user's knowledge library (folders they chose to index): returns the most relevant passages with file names and line numbers to cite.",
+        kind: ToolKind::Read,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "question": { "type": "string" }, "top": { "type": "integer", "description": "1-12, default 6." } },
+            "required": ["question"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
         name: "document_search",
         title: "Search documents",
         description: "Find the most relevant paragraphs for a question in the text documents (txt, md, csv, json, html, xml…) of a permitted folder, ranked locally. Returns file names, line numbers and excerpts to answer from and cite.",
@@ -912,6 +924,42 @@ pub const TOOLS: &[ToolSpec] = &[
             "type": "object",
             "properties": { "action": { "type": "string", "enum": ["list", "apply"] }, "name": { "type": "string" }, "launch_missing": { "type": "boolean" } },
             "required": ["action"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "browser_tabs",
+        title: "Browser tabs",
+        description: "Manage tabs in the browser session: list, new (opens a URL in a new tab), switch (by index) or close. Other browser tools act on the current tab.",
+        kind: ToolKind::Browser,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "action": { "type": "string", "enum": ["list", "new", "switch", "close"] }, "url": { "type": "string" }, "index": { "type": "integer" } },
+            "required": ["action"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "browser_extract",
+        title: "Extract page data",
+        description: "Extract structured data from the current page: tables (rows of cells), links, headings, or metadata (title, description, Open Graph, JSON-LD).",
+        kind: ToolKind::Browser,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "kind": { "type": "string", "enum": ["tables", "links", "headings", "metadata"] } },
+            "required": ["kind"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "browser_fill_form",
+        title: "Fill web form",
+        description: "Fill several fields of the current page by element ref (from browser_get_page_content). Never submits. Password/payment fields always ask; submitting is a separate browser_click that asks.",
+        kind: ToolKind::Browser,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "fields": { "type": "array", "items": { "type": "object", "properties": { "ref": { "type": "string" }, "text": { "type": "string" } }, "required": ["ref", "text"], "additionalProperties": false } } },
+            "required": ["fields"],
             "additionalProperties": false
         }),
     },

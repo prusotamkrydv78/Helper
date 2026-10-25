@@ -1,4 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { ScanEye, Sunrise } from "lucide-react";
+import { ConfirmDialog } from "../components/ui/overlays";
+import { featureService } from "../services/tauri/assistant";
 import { Activity, AppWindow, CalendarDays, Check, Cpu, Mail, Play, RefreshCw, ShieldAlert, Workflow as WorkflowIcon, X } from "lucide-react";
 import { Page, PageHeader } from "../components/layout/Page";
 import { Button } from "../components/ui/Button";
@@ -44,12 +47,14 @@ export function CommandCenterPage() {
     <Page className="max-w-6xl">
       <PageHeader title="Command Center" description="Live overview of approvals, workflows, schedules, accounts, activity and this computer." />
       <div className="grid gap-4 lg:grid-cols-2">
+        <BriefingCard />
         <ApprovalsCard />
         <QuickActionsCard />
         <WorkflowsCard />
         <AccountsCard />
         <SystemCard />
         <ActivityCard />
+        <ScreenCard />
       </div>
     </Page>
   );
@@ -398,6 +403,130 @@ function ActivityCard() {
             </li>
           ))}
         </ul>
+      )}
+    </Card>
+  );
+}
+
+/** One-off screen analysis, only after the user enables it; each capture is confirmed. Never continuous. */
+function ScreenCard() {
+  const { state, actions } = useStore();
+  const toast = useToast();
+  const enabled = state.settings.screenAnalysis;
+  const [windows, setWindows] = useState<{ window: number; title: string }[]>([]);
+  const [target, setTarget] = useState("");
+  const [region, setRegion] = useState("0, 0, 1280, 720");
+  const [question, setQuestion] = useState("");
+  const [result, setResult] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const loadWindows = () => void featureService.screenWindows().then((r) => setWindows(r.windows)).catch((e) => toast(message(e), "error"));
+  const regionNums = region.split(",").map((n) => Number(n.trim()));
+  const regionOk = regionNums.length === 4 && regionNums.every((n) => Number.isFinite(n));
+  const run = () => {
+    setBusy(true);
+    setResult(null);
+    const t = target === "region" ? { region: regionNums as [number, number, number, number] } : { window: Number(target) };
+    void featureService
+      .screenAnalyze(t, question, state.settings.model)
+      .then((r) => setResult(r.analysis))
+      .catch((e) => toast(message(e), "error"))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Card title="Screen analysis" icon={<ScanEye className="size-4" />}>
+      {!enabled ? (
+        <div className="space-y-2 text-sm">
+          <p className="text-fg-muted">
+            Takes one screenshot of a window or screen region when you ask, sends it to your AI model, and explains what's shown with its visible text and
+            suggested next steps. Off by default; never runs continuously.
+          </p>
+          <Button size="sm" variant="outline" disabled={!assistantService.available} onClick={() => actions.updateSettings({ screenAnalysis: true })}>
+            Enable screen analysis
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-2 text-sm">
+          <div className="flex gap-2">
+            <Select aria-label="What to capture" value={target} onFocus={loadWindows} onChange={(e) => setTarget(e.target.value)} className="flex-1">
+              <option value="">Choose a window…</option>
+              {windows.map((w) => (
+                <option key={w.window} value={String(w.window)}>
+                  {w.title}
+                </option>
+              ))}
+              <option value="region">A screen region…</option>
+            </Select>
+            <Button size="sm" variant="ghost" onClick={() => actions.updateSettings({ screenAnalysis: false })}>
+              Disable
+            </Button>
+          </div>
+          {target === "region" && (
+            <Input aria-label="Region: x, y, width, height" value={region} onChange={(e) => setRegion(e.target.value)} placeholder="x, y, width, height (pixels)" />
+          )}
+          <Input aria-label="Question" value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Optional question, e.g. what does this error mean?" />
+          <Button size="sm" variant="primary" loading={busy} disabled={!target || busy || (target === "region" && !regionOk)} onClick={() => setConfirm(true)}>
+            Analyze…
+          </Button>
+          {result && <p className="max-h-72 overflow-y-auto whitespace-pre-wrap rounded-md bg-surface-2 p-2 text-xs">{result}</p>}
+        </div>
+      )}
+      <ConfirmDialog
+        open={confirm}
+        onClose={() => setConfirm(false)}
+        onConfirm={run}
+        title="Send one screenshot to the AI?"
+        description="One image of the chosen window or region (everything visible in it) is sent to your AI provider for this analysis and not stored."
+        confirmLabel="Capture and analyze"
+      />
+    </Card>
+  );
+}
+
+/** The latest daily briefing (built locally from real data), with its time so it's never mistaken for fresh. */
+function BriefingCard() {
+  const { briefing, refreshBriefing } = useSchedules();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  return (
+    <Card
+      title="Briefing"
+      icon={<Sunrise className="size-4" />}
+      actions={
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={busy}
+          onClick={() => {
+            setBusy(true);
+            void refreshBriefing()
+              .catch((e) => toast(message(e), "error"))
+              .finally(() => setBusy(false));
+          }}
+        >
+          Refresh now
+        </Button>
+      }
+    >
+      {!briefing ? (
+        <p className="text-sm text-fg-muted">No briefing yet. Turn on the daily briefing in Settings, or refresh now.</p>
+      ) : (
+        <div className="space-y-2 text-sm">
+          <p className="text-xs text-fg-subtle">As of {new Date(briefing.generatedAt).toLocaleString()}</p>
+          {briefing.sections.map((s) => (
+            <div key={s.title}>
+              <p className="text-xs font-medium text-fg-subtle">{s.title}</p>
+              <ul>
+                {s.lines.map((l, i) => (
+                  <li key={i} className="text-xs">
+                    {l}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
       )}
     </Card>
   );

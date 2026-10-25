@@ -371,6 +371,71 @@ input positions use the same physical pixels.
 - **Preferences:** memory notes now include reusable instructions and preferred apps, and can be edited or
   disabled (disabled notes aren't sent to the model).
 
+## Hands-free voice, screen analysis, browser sessions, library, skills and task control
+
+- **Hands-free conversation** (Settings → Voice): a microphone pill shows when the mic is on; flow is
+  (optional wake phrase →) listen → reply → speak → listen for a follow-up. Windows speech recognition ends an
+  utterance after ~1.2 s of silence and gives up after 8 s without speech. **Mute** stops listening and
+  speaking at once; "stop listening" ends it. Nothing is recorded to disk.
+- **Screen analysis** (Command Center, opt-in): one screenshot of a chosen window or screen region, sent to the
+  vision model only after a confirmation; returns visible text, an explanation and suggested next steps.
+  Never continuous.
+- **Browser:** `browser_tabs` (list/new/switch/close), `browser_extract` (tables, links, headings, metadata
+  incl. JSON-LD), `browser_fill_form` (several fields, never submits; password/payment fields always ask).
+  Clicks on buy/pay/checkout/order/subscribe-like buttons always ask with a purchase warning. Optional
+  *Keep browser logins* uses a persistent profile in the app data folder (off by default). All address
+  blocking applies unchanged.
+- **Knowledge library** (Settings → Knowledge library): chosen folders inside allowed folders are indexed
+  locally (text documents, ≤ 256 MB of text), re-checked every minute by modification time; local answers with
+  file + line citations; "Answer with AI" sends only the shown passages after confirmation. Tool
+  `library_search` (Read files permission).
+- **Skills** (Settings → Skills, `skills.json`): named step lists, editable, enable/disable, "Run as workflow";
+  enabled skills are given to the model to follow on request. The likely required permissions are shown
+  (derived from tool names and wording). "Save as skill" on workflow cards.
+- **Resource awareness:** before each workflow step, it pauses (with the reason, plus a notification) if the
+  session is locked, the battery is below 15 % and not charging, memory use is ≥ 95 % or there's no network.
+  Unresponsive apps are already refused by the desktop tools (`app_not_responding`).
+- **Running** (sidebar): chat tool tasks, the running workflow and recoverable paused/failed workflows, with
+  current action, progress, approvals and Stop. **Stop everything** aborts all replies, voice and speech,
+  cancels the workflow, cancels every backend request and pending approval, closes the browser session, and
+  lists what couldn't be stopped (e.g. desktop calls waiting on a frozen app).
+
+## Reliable execution and the operator loop
+
+- **Dependencies:** a step may start with `[after 1, 3]` (the planner adds this where useful); without it a
+  step depends on all earlier steps. When a step fails, steps that don't depend on it still run; the rest wait
+  until you retry or skip it.
+- **Evidence:** each step records its turn's tool calls and real outcomes (completed / failed / declined /
+  cancelled). Completed calls that aren't read-only count as side effects.
+- **Retries:** a technical failure (model or network error) where **no side-effect action completed** is
+  retried automatically once after 5 s. Any other retry is manual, and if the step's evidence shows completed
+  side effects (or it was interrupted by a restart), the retry dialog lists them and asks first.
+- **Recovery guidance:** failed steps with completed side effects say what wasn't undone and where to undo it
+  (File rules undo history, Recycle Bin, or the service itself).
+- **Operator loop (enforced):** after every desktop action (click, type, select, fill, menu, input, window,
+  focus), element refs and screenshot records are cleared, so the next action needs a fresh inspection
+  (`inspect_first` / `stale_screenshot` otherwise), in addition to the focus, covered-point and
+  unsupported-control checks.
+- **Running view:** the active workflow shows its goal, current step and action with progress, recent evidence,
+  cancellation state, plus approvals and retry safety for paused/failed workflows.
+
+## Personal context, daily briefing and diagnostics
+
+- **Personal context:** memory notes can be preferences, explicit **corrections**, reusable instructions or
+  preferred apps (review, edit, disable, delete in Settings → Memory; saving from chat always asks). While you
+  type, matching enabled skills and workflow templates appear as chips under the chat box; nothing runs
+  unless you click one, and its steps still ask before consequential actions.
+- **Daily briefing** (Settings → Daily briefing, off by default): once a day after the chosen time (or when the
+  app opens later that day) a briefing is assembled locally — calendar events read directly from connected
+  Microsoft/Google accounts for the next N hours (each account says ok / not connected / unavailable), today's
+  reminders, pending approvals, interrupted and unfinished workflows. No AI writes it. It's shown on the
+  Command Center with its timestamp ("Refresh now" rebuilds it) and announced as a notification.
+- **Diagnostics** (Settings → Diagnostics): read-only configuration checks (API key present, browser worker,
+  Node.js, Edge, allowed folders, Microsoft/Google connection, clipboard history, shortcuts, knowledge library,
+  app data files and any set-aside corrupt files, stuck desktop actions, workflow recovery, permissions) —
+  nothing is started or sent. Separate **tests** run only on click (start the browser, listen once, speak,
+  send a notification) and show "Tested at …: passed/failed".
+
 ## Desktop app tools (Windows)
 
 The assistant can read and operate other apps' windows through Windows UI Automation

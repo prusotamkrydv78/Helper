@@ -10,6 +10,8 @@
 //   AA_BROWSER_HEADLESS  0 (default: visible window) | 1 to hide it. Search engines
 //                        tend to block headless browsers, so visible is the default.
 //   AA_SEARCH_URL        search results URL prefix (default DuckDuckGo HTML)
+//   AA_BROWSER_PROFILE   optional folder for a persistent profile (logins kept between
+//                        sessions); without it every session starts clean
 //   AA_BROWSER_TEST_ALLOW_HOSTS  comma-separated host:port allowed despite the
 //                        private-address policy — automated tests only
 
@@ -60,11 +62,29 @@ async function launch() {
   }
 }
 
-async function ensurePage() {
-  if (page && !page.isClosed()) return page;
-  browser ??= await launch();
-  // Service workers could fetch outside the request router, so they're blocked.
-  context = await browser.newContext({ acceptDownloads: true, serviceWorkers: "block", viewport: { width: 1280, height: 900 } });
+const CONTEXT_OPTIONS = { acceptDownloads: true, serviceWorkers: "block", viewport: { width: 1280, height: 900 } };
+
+/** One browser context per session (tabs share it); persistent when AA_BROWSER_PROFILE is set. */
+async function ensureContext() {
+  if (context) return context;
+  const profile = process.env.AA_BROWSER_PROFILE;
+  if (profile) {
+    const channel = process.env.AA_BROWSER_CHANNEL || "msedge";
+    try {
+      context = await chromium.launchPersistentContext(profile, {
+        ...CONTEXT_OPTIONS,
+        channel: channel === "chromium" ? undefined : channel,
+        headless: process.env.AA_BROWSER_HEADLESS === "1",
+        args: ["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
+      });
+    } catch (e) {
+      throw new ToolError("browser_unavailable", `Couldn't open the saved browser profile (is another copy using it?). ${String(e.message).split("\n")[0]}`);
+    }
+  } else {
+    browser ??= await launch();
+    // Service workers could fetch outside the request router, so they're blocked.
+    context = await browser.newContext(CONTEXT_OPTIONS);
+  }
   // `serviceWorkers: "block"` doesn't stop registration in every browser channel; refuse it in every frame too.
   await context.addInitScript(() => {
     if (typeof ServiceWorkerContainer !== "undefined") {
@@ -148,9 +168,65 @@ async function ensurePage() {
     ws.onMessage((m) => (server.readyState === 1 ? server.send(m) : pending.push(m)));
     ws.onClose(() => server.close());
   });
-  page = await context.newPage();
+  context.on("close", () => {
+    browser = context = page = null;
+  });
   log("session started");
+  return context;
+}
+
+async function ensurePage() {
+  if (page && !page.isClosed()) return page;
+  await ensureContext();
+  page = context.pages().find((p) => !p.isClosed()) ?? (await context.newPage());
   return page;
+}
+
+function openTabs() {
+  return context ? context.pages().filter((p) => !p.isClosed()) : [];
+}
+
+async function tabList() {
+  return Promise.all(openTabs().map(async (p, index) => ({ index, url: p.url(), title: await p.title().catch(() => ""), current: p === page })));
+}
+
+function tabAt(index) {
+  const p = openTabs()[Number(index)];
+  if (!p) throw new ToolError("not_found", `There's no tab ${index}. List the tabs first.`);
+  return p;
+}
+
+/** Structured data from the current page: tables, links, headings, metadata (incl. JSON-LD). */
+function extractStructured(kind) {
+  const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+  if (kind === "tables") {
+    return [...document.querySelectorAll("table")].slice(0, 10).map((t) => {
+      const rows = [...t.rows].slice(0, 100).map((r) => [...r.cells].slice(0, 20).map((c) => clean(c.innerText).slice(0, 200)));
+      return { caption: clean(t.caption?.innerText).slice(0, 200), rows };
+    });
+  }
+  if (kind === "links") {
+    return [...document.querySelectorAll("a[href]")]
+      .slice(0, 300)
+      .map((a) => ({ text: clean(a.innerText).slice(0, 120), href: a.href }))
+      .filter((l) => /^https?:/.test(l.href));
+  }
+  if (kind === "headings") {
+    return [...document.querySelectorAll("h1,h2,h3,h4")].slice(0, 200).map((h) => ({ level: Number(h.tagName[1]), text: clean(h.innerText).slice(0, 200) }));
+  }
+  const meta = {};
+  for (const m of document.querySelectorAll("meta[name],meta[property]")) {
+    const k = m.getAttribute("name") || m.getAttribute("property");
+    if (k && /^(description|keywords|author|og:|twitter:|article:|product:)/.test(k)) meta[k] = (m.getAttribute("content") || "").slice(0, 500);
+  }
+  const jsonLd = [];
+  for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+    try {
+      jsonLd.push(JSON.parse(s.textContent || ""));
+    } catch {}
+    if (jsonLd.length >= 5) break;
+  }
+  return { title: document.title, lang: document.documentElement.lang, meta, jsonLd };
 }
 
 function takeBlocked() {
@@ -451,6 +527,50 @@ const methods = {
     await shutdown();
     return { closed: true };
   },
+
+  async tabs() {
+    await ensureContext();
+    return { tabs: await tabList() };
+  },
+
+  async tab_new({ url }) {
+    const verdict = await policy.check(url);
+    if (!verdict.ok) throw new ToolError("blocked_url", verdict.reason);
+    await ensureContext();
+    page = await context.newPage();
+    blocked = [];
+    try {
+      const response = await followRedirects(page, await page.goto(url, { waitUntil: "domcontentloaded" }));
+      const navBlock = blocked.find((b) => b.navigation);
+      if (navBlock) throw new ToolError("blocked_url", `Redirect blocked: ${navBlock.reason}`);
+      return { ...(await pageSummary(page, { status: response ? response.status() : null })), tabs: await tabList() };
+    } catch (e) {
+      if (e instanceof ToolError) throw e;
+      throw new ToolError("navigation_failed", String(e.message).split("\n")[0]);
+    }
+  },
+
+  async tab_switch({ index }) {
+    await ensureContext();
+    page = tabAt(index);
+    await page.bringToFront().catch(() => {});
+    return pageSummary(page, { tabs: await tabList() });
+  },
+
+  async tab_close({ index }) {
+    await ensureContext();
+    const p = tabAt(index);
+    await p.close();
+    if (p === page) page = openTabs().at(-1) ?? null;
+    return { closed: index, tabs: await tabList() };
+  },
+
+  async extract({ kind }) {
+    if (!["tables", "links", "headings", "metadata"].includes(kind)) throw new ToolError("invalid_arguments", "kind must be tables, links, headings or metadata.");
+    const p = await ensurePage();
+    const data = await p.evaluate(extractStructured, kind);
+    return { url: p.url(), title: await p.title().catch(() => ""), kind, data };
+  },
 };
 
 function safeFileName(raw) {
@@ -470,8 +590,10 @@ function uniquePath(dir, name) {
 
 async function shutdown() {
   const b = browser;
+  const c = context;
   browser = context = page = null;
   if (b) await b.close().catch(() => {});
+  else if (c) await c.close().catch(() => {}); // persistent context (no separate browser object)
 }
 
 // ---------------------------------------------------------------------------

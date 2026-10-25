@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ID, Workflow, WorkflowStep } from "../types";
+import type { ID, StepEvidence, Workflow, WorkflowStep } from "../types";
 import { nowISO, uid } from "../lib/utils";
-import { workflowService } from "../services/tauri/workflows";
+import { triggerService, workflowService } from "../services/tauri/workflows";
 import { useStore, type TurnResult } from "./AppStore";
 import { useNotifications } from "./NotificationStore";
 
@@ -107,6 +107,46 @@ function stepPrompt(w: Workflow, index: number): string {
     .join("\n\n");
 }
 
+/** "[after 1, 2] Do X" → dependencies + instruction. */
+export function parseStep(line: string): { instruction: string; dependsOn?: number[] } {
+  const m = line.match(/^\s*\[after\s+([\d,\s]+)\]\s*(.*)$/i);
+  if (!m) return { instruction: line.trim() };
+  const deps = m[1].split(",").map((n) => Number(n.trim())).filter((n) => Number.isInteger(n) && n > 0);
+  return { instruction: m[2].trim(), dependsOn: deps.length ? deps : undefined };
+}
+
+/** Completed actions with side effects in a step (what a retry might repeat). */
+export function sideEffects(step: WorkflowStep): StepEvidence[] {
+  return (step.evidence ?? []).filter((e) => e.status === "completed" && !e.readOnly);
+}
+
+const depsOf = (w: Workflow, index: number) => w.steps[index].dependsOn ?? Array.from({ length: index }, (_, i) => i + 1);
+
+/** The next step that can run: pending, with every dependency completed or skipped. */
+function nextRunnable(w: Workflow): { index: number; blocked: WorkflowStep[] } {
+  const blocked: WorkflowStep[] = [];
+  for (let i = 0; i < w.steps.length; i++) {
+    if (w.steps[i].status !== "pending") continue;
+    const deps = depsOf(w, i).map((n) => w.steps[n - 1]).filter(Boolean);
+    if (deps.every((d) => d.status === "completed" || d.status === "skipped")) return { index: i, blocked };
+    if (deps.some((d) => ["failed", "cancelled", "interrupted"].includes(d.status))) blocked.push(w.steps[i]);
+    else return { index: -1, blocked }; // waits for an earlier pending step
+  }
+  return { index: -1, blocked };
+}
+
+/** A reason not to start the next step now, or null. Unknown state never blocks. */
+async function resourceProblem(): Promise<string | null> {
+  const st = await triggerService.state().catch(() => null);
+  if (!st) return null;
+  if (st.locked) return "the Windows session is locked (desktop and app steps can't work)";
+  const b = st.battery;
+  if (b?.present && !b.on_ac_power && b.percent != null && b.percent < 15) return `the battery is at ${b.percent}% and not charging`;
+  if (st.memory_percent != null && st.memory_percent >= 95) return `memory use is at ${st.memory_percent}%`;
+  if (st.online === false) return "there's no network connection (the AI model can't be reached)";
+  return null;
+}
+
 /** Maps a finished turn to the step's outcome. A missing result line counts as a failure. */
 function outcome(r: TurnResult): Pick<WorkflowStep, "status" | "result" | "error" | "output"> {
   if (r.status === "error") return { status: "failed", error: r.error || "The assistant reply failed." };
@@ -138,6 +178,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   appRef.current = app;
   const notifyRef = useRef(state.settings.notifications);
   notifyRef.current = state.settings.notifications;
+  const resourceRef = useRef(state.settings.resourceAware);
+  resourceRef.current = state.settings.resourceAware;
   const modelRef = useRef(state.settings.model);
   modelRef.current = state.settings.model;
 
@@ -220,19 +262,27 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
             await patch(id, { status: "paused", pauseRequested: false });
             return;
           }
-          const index = w.steps.findIndex((s) => s.status === "pending");
+          const { index, blocked } = nextRunnable(w);
           if (index < 0) {
             const failed = w.steps.some((s) => s.status === "failed" || s.status === "interrupted");
-            await patch(id, { status: failed ? "failed" : "completed" });
+            await patch(id, { status: failed || blocked.length ? "failed" : "completed" });
             notifyRef2.current({
-              kind: failed ? "failed" : "completed",
-              title: `Workflow ${failed ? "finished with failures" : "completed"}`,
-              body: w.title,
+              kind: failed || blocked.length ? "failed" : "completed",
+              title: `Workflow ${failed || blocked.length ? "stopped with failures" : "completed"}`,
+              body: blocked.length ? `${w.title}: ${blocked.length} step(s) wait for a failed step. Retry or skip it.` : w.title,
               target: { view: "workflows" },
             });
             return;
           }
           const step = w.steps[index];
+          if (resourceRef.current) {
+            const problem = await resourceProblem();
+            if (problem) {
+              await patch(id, { status: "paused", pauseRequested: false, pausedReason: `Paused before step ${index + 1} because ${problem}. Resume when it's resolved.` });
+              notifyRef2.current({ kind: "failed", title: "Workflow paused", body: `“${w.title}”: ${problem}.`, target: { view: "workflows" } });
+              return;
+            }
+          }
           // Write-ahead: if this save fails, don't start the step (it couldn't be recovered safely).
           try {
             await patchStep(id, step.id, { status: "running", attempts: step.attempts + 1, startedAt: nowISO(), finishedAt: undefined, error: undefined });
@@ -251,13 +301,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           try {
             result = await appRef.current.runTurn(conversationId, stepPrompt(w, index));
           } catch (e) {
-            result = { status: "error", content: "", error: errorText(e), live: true };
+            result = { status: "error", content: "", error: errorText(e), live: true, tools: [] };
           }
           const now = ref.current.find((x) => x.id === id);
           if (result.status === "stopped") {
             const cancelled = now?.status === "cancelled";
             await patchStep(id, step.id, {
               status: cancelled ? "cancelled" : "failed",
+              evidence: result.tools,
               finishedAt: nowISO(),
               error: cancelled ? "Cancelled." : "Stopped before the step finished. Check what it already did before retrying.",
             });
@@ -265,11 +316,23 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
             return;
           }
           const o = outcome(result);
-          await patchStep(id, step.id, { ...o, finishedAt: nowISO() });
+          const effects = result.tools.filter((t) => t.status === "completed" && !t.readOnly);
+          // A technical failure where nothing with side effects ran can safely be retried once.
+          if (o.status === "failed" && result.status === "error" && effects.length === 0 && !step.autoRetried) {
+            await patchStep(id, step.id, { status: "pending", autoRetried: true, evidence: result.tools, error: `Retrying automatically after: ${o.error}` });
+            await new Promise((r) => setTimeout(r, 5000));
+            continue;
+          }
+          await patchStep(id, step.id, { ...o, evidence: result.tools, finishedAt: nowISO() });
           if (o.status === "failed") {
-            await patch(id, { status: "failed", pauseRequested: false });
-            notifyRef2.current({ kind: "failed", title: "Workflow step failed", body: `${w.title}: ${o.error ?? "step failed"}`, target: { view: "workflows" } });
-            return;
+            notifyRef2.current({
+              kind: "failed",
+              title: "Workflow step failed",
+              body: `${w.title}: ${o.error ?? "step failed"}${effects.length ? ` (${effects.length} action(s) in it had completed — review before retrying)` : ""}`,
+              target: { view: "workflows" },
+            });
+            // Independent steps (explicit [after …] without this one) still run; the rest wait.
+            continue;
           }
         }
       } catch (e) {
@@ -293,7 +356,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           title: name,
           goal: goal.trim(),
           status: "draft",
-          steps: clean.map((instruction) => ({ id: uid("wfs"), instruction, status: "pending", attempts: 0 })),
+          steps: clean.map((line) => ({ id: uid("wfs"), ...parseStep(line), status: "pending", attempts: 0 })),
           conversationId: appRef.current.createWorkflowConversation(`Workflow: ${name}`),
           createdAt: nowISO(),
           updatedAt: nowISO(),
@@ -304,7 +367,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       plan: (goal) => workflowService.plan(goal, modelRef.current),
       start: (id) => {
         if (running.current && running.current !== id) throw new Error("Another workflow is running. Pause or cancel it first.");
-        void patch(id, { status: "running", pauseRequested: false }).then(() => runLoop(id), () => {});
+        void patch(id, { status: "running", pauseRequested: false, pausedReason: undefined }).then(() => runLoop(id), () => {});
       },
       pause: (id) => {
         if (running.current === id) void patch(id, { pauseRequested: true }).catch(() => {});
@@ -323,7 +386,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       },
       retryStep: (id, stepId) => {
         if (running.current === id) return;
-        void patchStep(id, stepId, { status: "pending", error: undefined, finishedAt: undefined })
+        void patchStep(id, stepId, { status: "pending", error: undefined, finishedAt: undefined, autoRetried: false })
           .then(() => actions.start(id))
           .catch(() => {});
       },
@@ -351,7 +414,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           title,
           goal: src.goal,
           status: "running",
-          steps: src.steps.map((s) => ({ id: uid("wfs"), instruction: s.instruction, status: "pending", attempts: 0 })),
+          steps: src.steps.map((s) => ({ id: uid("wfs"), instruction: s.instruction, dependsOn: s.dependsOn, status: "pending", attempts: 0 })),
           conversationId: appRef.current.createWorkflowConversation(`Workflow: ${title}`),
           scheduleId,
           createdAt: nowISO(),

@@ -6,7 +6,7 @@ import { Button } from "../components/ui/Button";
 import { Badge, EmptyState, Field, Input, Textarea } from "../components/ui/primitives";
 import { ConfirmDialog, useToast } from "../components/ui/overlays";
 import { useStore } from "../store/AppStore";
-import { useWorkflows } from "../store/WorkflowStore";
+import { sideEffects, useWorkflows } from "../store/WorkflowStore";
 import { SchedulesSection, TriggersSection } from "./SchedulesSection";
 import { cn, formatRelative } from "../lib/utils";
 
@@ -137,6 +137,7 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
             {wf.template && <span className="ml-2 rounded bg-accent/15 px-1.5 text-xs text-accent">template</span>}
           </h2>
           {wf.goal && <p className="mt-0.5 text-sm text-fg-muted">{wf.goal}</p>}
+          {wf.status === "paused" && wf.pausedReason && <p className="mt-1 text-xs text-warning">{wf.pausedReason}</p>}
           <p className="mt-1 text-xs text-fg-subtle">Updated {formatRelative(wf.updatedAt)}</p>
         </div>
         <Badge tone={STATUS_TONE[wf.status]}>
@@ -169,6 +170,26 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
                   </p>
                   {s.error && <p className="mt-1 text-xs text-danger">{s.error}</p>}
                   {s.result && <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs text-fg-muted">{s.result}</p>}
+                  {s.dependsOn && <p className="text-[11px] text-fg-subtle">After step(s) {s.dependsOn.join(", ")}</p>}
+                  {s.evidence && s.evidence.length > 0 && (
+                    <details className="mt-1 text-xs">
+                      <summary className="cursor-pointer text-fg-subtle">Evidence ({s.evidence.length} tool call{s.evidence.length === 1 ? "" : "s"})</summary>
+                      <ul className="mt-1 space-y-0.5">
+                        {s.evidence.map((e, i) => (
+                          <li key={i} className={e.status === "completed" ? "" : "text-fg-subtle"}>
+                            {e.title} — {e.status}
+                            {e.summary ? `: ${e.summary}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {(s.status === "failed" || s.status === "interrupted") && sideEffects(s).length > 0 && (
+                    <p className="mt-1 rounded bg-warning-soft px-2 py-1 text-xs">
+                      Recovery: {sideEffects(s).length} action(s) in this step completed and were not undone. Moves, renames and organizing can be undone in
+                      Settings → File rules; deleted files are in the Recycle Bin; sent mail and created events must be handled in that service.
+                    </p>
+                  )}
                   {s.output && (
                     <p className="mt-1 line-clamp-3 whitespace-pre-wrap rounded bg-surface-2 px-2 py-1 text-xs">
                       <span className="font-medium">Output passed to later steps: </span>
@@ -178,7 +199,7 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
                 </div>
                 {retryable && (
                   <div className="flex shrink-0 gap-1">
-                    <Button size="sm" variant="outline" icon={<RotateCcw className="size-3.5" />} onClick={s.status === "interrupted" ? () => setConfirmRetry(s) : guard(() => actions.retryStep(wf.id, s.id))}>
+                    <Button size="sm" variant="outline" icon={<RotateCcw className="size-3.5" />} onClick={s.status === "interrupted" || sideEffects(s).length ? () => setConfirmRetry(s) : guard(() => actions.retryStep(wf.id, s.id))}>
                       Retry
                     </Button>
                     <Button size="sm" variant="ghost" icon={<SkipForward className="size-3.5" />} onClick={guard(() => actions.skipStep(wf.id, s.id))}>
@@ -228,6 +249,19 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
             {wf.template ? "Remove from templates" : "Save as template"}
           </Button>
         )}
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            app.setView("settings");
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent("jarvis:new-skill", { detail: { name: wf.title, description: wf.goal, steps: wf.steps.map((s) => s.instruction) } }));
+              document.getElementById("settings-skills")?.scrollIntoView();
+            }, 300);
+          }}
+        >
+          Save as skill
+        </Button>
         {wf.template && (
           <Button size="sm" variant="outline" icon={<Play className="size-3.5" />} onClick={guard(() => actions.runCopy(wf.id, "manual run", "manual"))}>
             Run a copy
@@ -246,8 +280,24 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
         open={confirmRetry !== null}
         onClose={() => setConfirmRetry(null)}
         onConfirm={guard(() => confirmRetry && actions.retryStep(wf.id, confirmRetry.id))}
-        title="Retry an interrupted step?"
-        description={`“${confirmRetry?.instruction ?? ""}” was running when the app closed, so it may already have done part of its work (sent, moved or changed something). Check the conversation and your files first. Retrying runs the whole step again.`}
+        title="Retry this step?"
+        description={
+          <span className="block space-y-1">
+            <span className="block">
+              {confirmRetry?.status === "interrupted"
+                ? `“${confirmRetry?.instruction ?? ""}” was running when the app closed, so it may already have done part of its work.`
+                : `“${confirmRetry?.instruction ?? ""}” failed after some of its actions had already completed:`}
+            </span>
+            {confirmRetry &&
+              sideEffects(confirmRetry).map((e, i) => (
+                <span key={i} className="block text-xs">
+                  • {e.title}
+                  {e.summary ? ` — ${e.summary}` : ""}
+                </span>
+              ))}
+            <span className="block">Retrying runs the whole step again and may repeat them. Check the conversation and your files first.</span>
+          </span>
+        }
         confirmLabel="Retry step"
       />
       <ConfirmDialog

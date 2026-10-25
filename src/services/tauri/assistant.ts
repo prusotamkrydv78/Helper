@@ -178,6 +178,25 @@ export const featureService = {
   layoutPreview: async (windows: LayoutWindow[]): Promise<LayoutPreviewRow[]> => invoke("layout_preview", { windows }),
   layoutApply: async (windows: LayoutWindow[], launchMissing: boolean, allowedApps: string[]): Promise<{ arranged: number; launched?: string[] }> =>
     invoke("layout_apply", { windows, launchMissing, allowedApps }),
+  voiceWaitForPhrase: async (phrase: string): Promise<string> => invoke("voice_wait_for_phrase", { phrase }),
+  stopAll: async (): Promise<{ cancelledRequests: number; browserClosed: boolean; notStopped: string[] } | null> => (isTauri() ? invoke("stop_all") : null),
+  browserSetPersistent: async (enabled: boolean): Promise<void> => (isTauri() ? invoke("browser_set_persistent", { enabled }) : undefined),
+  skillsLoad: async (): Promise<Skill[]> => (isTauri() ? invoke("skills_load") : []),
+  skillsSave: async (skills: Skill[]): Promise<void> => invoke("skills_save", { skills }),
+  libraryStatus: async (): Promise<LibraryStatus | null> => (isTauri() ? invoke("library_status") : null),
+  librarySetFolders: async (folders: string[]): Promise<LibraryStatus> => invoke("library_set_folders", { folders }),
+  /** Local only: passages from the indexed library; nothing is sent. */
+  libraryQuery: async (question: string): Promise<DocResult[]> => invoke("library_query", { question }),
+  screenWindows: async (): Promise<{ windows: { window: number; title: string; exe: string }[] }> => invoke("screen_windows"),
+  /** Sends ONE screenshot to the AI model (the user confirmed). */
+  screenAnalyze: async (target: { window?: number; region?: [number, number, number, number] }, question: string, model: string): Promise<{ analysis: string; window: string }> =>
+    invoke("screen_analyze", { window: target.window ?? null, region: target.region ?? null, question: question || null, model: model.trim() || null }),
+  /** Read-only configuration checks. */
+  diagnostics: async (): Promise<{ checks: { id: string; label: string; status: "ok" | "problem" | "info"; detail: string }[] }> => invoke("diagnostics"),
+  /** Explicit test: starts the browser. */
+  diagnoseBrowser: async (): Promise<{ ok: boolean; tabs: number; ms: number }> => invoke("diagnose_browser"),
+  /** Calendar events read directly from connected accounts (no AI). */
+  briefingCalendar: async (hours: number): Promise<BriefingCalendar | null> => (isTauri() ? invoke("briefing_calendar", { hours }) : null),
   /** Local only: nothing is sent to the AI. */
   documentsSearch: async (path: string, query: string): Promise<{ results: DocResult[]; searched_files: number }> => invoke("documents_search", { path, query }),
 };
@@ -201,4 +220,31 @@ export interface DocResult {
   line: number;
   score: number;
   excerpt: string;
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  steps: string[];
+  enabled: boolean;
+}
+
+export interface LibraryStatus {
+  folders: string[];
+  files: number;
+  passages: number;
+  lastRefresh: number | null;
+  errors: string[];
+}
+
+export interface BriefingCalendar {
+  from: string;
+  to: string;
+  accounts: {
+    service: string;
+    status: "ok" | "not_connected" | "not_configured" | "error";
+    error?: string;
+    events?: { subject?: string; start?: string; start_utc?: string; all_day?: boolean; location?: string }[];
+  }[];
 }

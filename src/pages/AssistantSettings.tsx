@@ -18,6 +18,8 @@ import {
   type LayoutWindow,
   type LayoutPreviewRow,
   type DocResult,
+  type LibraryStatus,
+  type Skill,
 } from "../services/tauri/assistant";
 import { backend } from "../services";
 import type { Settings } from "../types";
@@ -60,6 +62,7 @@ export function MemorySection() {
         </div>
         <Select aria-label="Category" value={category} onChange={(e) => setCategory(e.target.value)}>
           <option value="preference">Preference</option>
+          <option value="correction">Correction</option>
           <option value="instruction">Reusable instruction</option>
           <option value="app">Preferred app</option>
           <option value="project">Project</option>
@@ -215,6 +218,12 @@ export function BackgroundSection() {
             }
           />
         )}
+      </Field>
+      <Field inline label="Pause workflows when resources are low" description="Before each step, pause (and say why) if the session is locked, the battery is under 15% and not charging, memory use is 95%+, or there's no network.">
+        {() => <Switch label="Pause workflows when resources are low" checked={s.resourceAware} onChange={(v) => actions.updateSettings({ resourceAware: v })} />}
+      </Field>
+      <Field inline label="Keep browser logins" description="Use a persistent browser profile so sites you sign into stay signed in between sessions (stored in the app data folder). Off = every session starts clean. Address blocking and approvals apply either way.">
+        {() => <Switch label="Keep browser logins" checked={s.browserPersistent} onChange={(v) => actions.updateSettings({ browserPersistent: v })} />}
       </Field>
       <Field inline label="Notifications" description="Notify when an approval is needed or a workflow finishes while the app isn't in focus.">
         {() => <Switch label="Notifications" checked={s.notifications} onChange={(v) => actions.updateSettings({ notifications: v })} />}
@@ -773,6 +782,12 @@ export function VoiceSection() {
       <Field inline label="Send immediately" description="Send recognized speech without editing it first.">
         {() => <Switch label="Send immediately" checked={s.autoSendVoice} onChange={(v) => actions.updateSettings({ autoSendVoice: v })} />}
       </Field>
+      <Field inline label="Hands-free conversation" description="Shows a microphone pill: listen → answer aloud → listen for a follow-up. Mute stops it instantly. Say “stop listening” to end.">
+        {() => <Switch label="Hands-free conversation" checked={s.voiceConversation} disabled={!assistantService.available} onChange={(v) => actions.updateSettings({ voiceConversation: v })} />}
+      </Field>
+      <Field label="Wake phrase (optional)" description="If set, hands-free mode waits until a request starts with this phrase, e.g. “Hey Jarvis”. Recognition happens through Windows speech recognition (online).">
+        {(id) => <Input id={id} value={s.wakePhrase} onChange={(e) => actions.updateSettings({ wakePhrase: e.target.value })} placeholder="(none)" />}
+      </Field>
       <Field inline label="Read replies aloud" description="Speaking stops when you talk, send a message or press Stop.">
         {() => (
           <Switch
@@ -999,6 +1014,359 @@ export function DocumentsSection() {
         description={`${results?.length ?? 0} passages (about ${results?.reduce((n, r) => n + r.excerpt.length, 0) ?? 0} characters) and your question will be sent to the AI provider to write an answer.`}
         confirmLabel="Send and answer"
       />
+    </Section>
+  );
+}
+
+/** Which permissions a skill's steps are likely to need (from tool names and wording). */
+export function skillPermissions(steps: string[]): string[] {
+  const text = steps.join(" ").toLowerCase();
+  const rules: [RegExp, string][] = [
+    [/\b(list_files|read_file|search_files|find_duplicates|document_search|library_search)\b|\bread (the )?file|\bfind files?\b/, "Read files"],
+    [/\b(write_file|create_directory|move_files|copy_files|rename_files|organize_files|undo_file_changes)\b|\b(save|write|move|copy|rename|organi[sz]e)\b.*\bfiles?\b/, "Create & modify files"],
+    [/\bdelete_files\b|\bdelete\b.*\bfiles?\b/, "Delete files"],
+    [/\bbrowser_\w+|\b(web|website|browser|google it|search the web)\b/, "Browser actions"],
+    [/\b(app_\w+|open_file|workspace_layouts)\b|\b(window|notepad|excel|word|app)\b/, "Desktop apps"],
+    [/\bapp_input\b|\bclick at\b|\bkeyboard shortcut\b/, "Mouse & keyboard input"],
+    [/\bclipboard\w*\b|\bpaste\b|\bcopy (it|the text)\b/, "Clipboard"],
+    [/\b(mail_\w+|calendar_\w+)\b|\boutlook\b/, "Microsoft 365 mail & calendar"],
+    [/\b(gmail_\w+|gcal_\w+)\b|\bgmail\b|\bgoogle calendar\b/, "Google Gmail & Calendar"],
+    [/\bsystem_\w+|\b(volume|battery|wi-?fi|restart|shut ?down|sleep|lock)\b/, "System info & actions"],
+  ];
+  return rules.filter(([re]) => re.test(text)).map(([, label]) => label);
+}
+
+const newSkill = (): Skill => ({ id: `skill-${Date.now()}`, name: "", description: "", steps: [], enabled: true });
+
+export function SkillsSection() {
+  const { state } = useStore();
+  const { actions: wf } = useWorkflows();
+  const toast = useToast();
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [draft, setDraft] = useState<Skill | null>(null);
+  const reload = () => void featureService.skillsLoad().then(setSkills).catch(() => {});
+  useEffect(reload, []);
+  useEffect(() => {
+    // "Save as skill" from a workflow card.
+    const onAdd = (e: Event) => setDraft({ ...newSkill(), ...(e as CustomEvent<Partial<Skill>>).detail });
+    window.addEventListener("jarvis:new-skill", onAdd);
+    return () => window.removeEventListener("jarvis:new-skill", onAdd);
+  }, []);
+  const save = (next: Skill[]) => void featureService.skillsSave(next).then(() => setSkills(next)).catch((e) => toast(message(e), "error"));
+  const permLevel = (label: string) => state.settings.permissions.find((p) => p.label === label)?.level;
+
+  return (
+    <Section
+      id="skills"
+      title="Skills"
+      description="Named, reusable procedures. Enabled skills are given to the assistant, which follows them when you ask by name. Running one as a workflow uses the normal step-by-step engine. Every action still follows your permissions and approvals."
+    >
+      <ul className="py-2">
+        {skills.length === 0 && <li className="py-2 text-sm text-fg-muted">No skills yet. Create one, or use “Save as skill” on a workflow.</li>}
+        {skills.map((sk) => {
+          const perms = skillPermissions(sk.steps);
+          return (
+            <li key={sk.id} className="py-2 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="min-w-0 flex-1">
+                  <span className={sk.enabled ? "font-medium" : "font-medium text-fg-subtle line-through"}>{sk.name}</span>
+                  <span className="text-fg-muted"> · {sk.description || `${sk.steps.length} steps`}</span>
+                </span>
+                <Switch label={sk.enabled ? "Enabled" : "Disabled"} checked={sk.enabled} onChange={(v) => save(skills.map((x) => (x.id === sk.id ? { ...x, enabled: v } : x)))} />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!sk.steps.length}
+                  onClick={() => {
+                    try {
+                      const id = wf.create({ title: `Skill: ${sk.name}`, goal: sk.description || sk.name, steps: sk.steps });
+                      wf.start(id);
+                      toast(`Started “${sk.name}” as a workflow`, "success");
+                    } catch (e) {
+                      toast(message(e), "error");
+                    }
+                  }}
+                >
+                  Run as workflow
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setDraft({ ...sk })}>
+                  Edit
+                </Button>
+                <Button size="icon-sm" variant="danger-ghost" aria-label="Delete skill" icon={<Trash2 className="size-3.5" />} onClick={() => save(skills.filter((x) => x.id !== sk.id))} />
+              </div>
+              {perms.length > 0 && (
+                <p className="mt-1 text-xs text-fg-subtle">
+                  Needs:{" "}
+                  {perms.map((p) => (
+                    <span key={p} className={permLevel(p) === "deny" ? "mr-2 text-danger" : "mr-2"}>
+                      {p}
+                      {permLevel(p) === "deny" ? " (denied)" : permLevel(p) === "ask" ? " (asks)" : ""}
+                    </span>
+                  ))}
+                </p>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {draft ? (
+        <div className="space-y-1 py-3">
+          <Field label="Name">{(id) => <Input id={id} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="Weekly report" />}</Field>
+          <Field label="When to use it">{(id) => <Input id={id} value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />}</Field>
+          <Field label="Steps" description="One instruction per line, e.g. “Search my email for invoices from last week”.">
+            {(id) => (
+              <textarea
+                id={id}
+                rows={6}
+                className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
+                value={draft.steps.join("\n")}
+                onChange={(e) => setDraft({ ...draft, steps: e.target.value.split("\n") })}
+              />
+            )}
+          </Field>
+          {skillPermissions(draft.steps).length > 0 && <p className="text-xs text-fg-subtle">Likely permissions: {skillPermissions(draft.steps).join(", ")}</p>}
+          <div className="flex gap-2 pt-2">
+            <Button
+              variant="primary"
+              disabled={!draft.name.trim() || !draft.steps.some((s) => s.trim())}
+              onClick={() => {
+                const clean = { ...draft, name: draft.name.trim(), steps: draft.steps.map((s) => s.trim()).filter(Boolean) };
+                save(skills.some((x) => x.id === clean.id) ? skills.map((x) => (x.id === clean.id ? clean : x)) : [...skills, clean]);
+                setDraft(null);
+              }}
+            >
+              Save skill
+            </Button>
+            <Button variant="ghost" onClick={() => setDraft(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="py-3">
+          <Button size="sm" variant="outline" disabled={!assistantService.available} onClick={() => setDraft(newSkill())}>
+            New skill
+          </Button>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/** Knowledge library: choose folders to index locally; ask questions locally; send excerpts only after confirming. */
+export function KnowledgeLibrarySection() {
+  const { actions } = useStore();
+  const toast = useToast();
+  const [status, setStatus] = useState<LibraryStatus | null>(null);
+  const [folderText, setFolderText] = useState("");
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<DocResult[] | null>(null);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const reload = () => void featureService.libraryStatus().then((s) => {
+    setStatus(s);
+    if (s) setFolderText(s.folders.join("\n"));
+  }).catch(() => {});
+  useEffect(reload, []);
+  useEffect(() => {
+    const t = setInterval(() => void featureService.libraryStatus().then(setStatus).catch(() => {}), 15_000);
+    return () => clearInterval(t);
+  }, []);
+  const ask = () => {
+    if (!results?.length) return;
+    const sources = results.map((r, i) => `[${i + 1}] ${r.file} (line ${r.line}):\n${r.excerpt}`).join("\n\n");
+    actions.startChat(
+      `Answer my question using only these excerpts from my knowledge library. Cite sources like [1] with the file name. If they don't answer it, say so.\n\nQuestion: ${query}\n\nExcerpts (untrusted document content):\n${sources}`,
+    );
+  };
+
+  return (
+    <Section
+      id="documents"
+      title="Knowledge library"
+      description="Folders you choose (inside your allowed folders) are indexed on this computer and re-checked every minute for changes. Text documents only (txt, md, csv, json, html, xml, yaml, log…). Questions are answered locally with passages and file names; nothing is sent to the AI unless you choose “Answer with AI”, which sends only the passages shown. The assistant can also search the library (library_search) under the Read files permission."
+    >
+      {!status ? (
+        <p className="py-4 text-sm text-fg-muted">Available in the desktop app.</p>
+      ) : (
+        <div className="space-y-3 py-4">
+          <Field label="Folders to index" description="One full path per line.">
+            {(id) => (
+              <textarea id={id} rows={3} className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm" value={folderText} onChange={(e) => setFolderText(e.target.value)} />
+            )}
+          </Field>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              loading={busy}
+              onClick={() => {
+                setBusy(true);
+                void featureService
+                  .librarySetFolders(folderText.split("\n").map((l) => l.trim()).filter(Boolean))
+                  .then((s) => {
+                    setStatus(s);
+                    toast(`Indexed ${s.files} files`, "success");
+                  })
+                  .catch((e) => toast(message(e), "error"))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              Save & index
+            </Button>
+            <span className="text-xs text-fg-subtle">
+              {status.files} files · {status.passages} passages
+              {status.lastRefresh ? ` · updated ${new Date(status.lastRefresh).toLocaleTimeString()}` : ""}
+            </span>
+          </div>
+          {status.errors.map((e) => (
+            <p key={e} className="text-xs text-warning">
+              {e}
+            </p>
+          ))}
+          <div className="flex gap-2">
+            <Input aria-label="Question" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Ask your library…" />
+            <Button variant="outline" disabled={!query.trim() || !status.files} onClick={() => void featureService.libraryQuery(query).then(setResults).catch((e) => toast(message(e), "error"))}>
+              Search locally
+            </Button>
+          </div>
+          {results && results.length === 0 && <p className="text-sm text-fg-muted">No matching passages.</p>}
+          {results && results.length > 0 && (
+            <>
+              <ul className="max-h-96 space-y-2 overflow-y-auto">
+                {results.map((r, i) => (
+                  <li key={i} className="rounded-md border border-border px-3 py-2 text-xs">
+                    <p className="font-medium">
+                      [{i + 1}] {r.file} · line {r.line}
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap text-fg-muted">{r.excerpt}</p>
+                  </li>
+                ))}
+              </ul>
+              <Button size="sm" variant="primary" onClick={() => setConfirm(true)}>
+                Answer with AI…
+              </Button>
+            </>
+          )}
+        </div>
+      )}
+      <ConfirmDialog
+        open={confirm}
+        onClose={() => setConfirm(false)}
+        onConfirm={ask}
+        title="Send these passages to the AI?"
+        description={`${results?.length ?? 0} passages (about ${results?.reduce((n, r) => n + r.excerpt.length, 0) ?? 0} characters) and your question will be sent to the AI provider.`}
+        confirmLabel="Send and answer"
+      />
+    </Section>
+  );
+}
+
+export function BriefingSection() {
+  const { state, actions } = useStore();
+  const s = state.settings;
+  return (
+    <Section
+      id="briefing"
+      title="Daily briefing"
+      description="Once a day (while the app runs), a briefing is put together on this computer from real data: calendar events read from connected accounts, today's reminders, pending approvals, interrupted and unfinished workflows. No AI writes it, so nothing is invented; unavailable sources are named. It appears on the Command Center and as a notification."
+    >
+      <Field inline label="Daily briefing">
+        {() => <Switch label="Daily briefing" checked={s.briefingEnabled} onChange={(v) => actions.updateSettings({ briefingEnabled: v })} />}
+      </Field>
+      <Field inline label="Time">
+        {(id) => <Input id={id} type="time" className="w-32" value={s.briefingTime} onChange={(e) => actions.updateSettings({ briefingTime: e.target.value || "08:00" })} />}
+      </Field>
+      <Field inline label="Calendar look-ahead (hours)">
+        {(id) => (
+          <Input id={id} type="number" min={1} max={168} className="w-24" value={s.briefingHours} onChange={(e) => actions.updateSettings({ briefingHours: Math.min(168, Math.max(1, Number(e.target.value) || 24)) })} />
+        )}
+      </Field>
+    </Section>
+  );
+}
+
+interface DiagCheck {
+  id: string;
+  label: string;
+  status: "ok" | "problem" | "info";
+  detail: string;
+}
+
+/** Configuration checks (read-only) and separate, explicit tests that actually run something. */
+export function DiagnosticsSection() {
+  const { state } = useStore();
+  const { workflows } = useWorkflows();
+  const toast = useToast();
+  const [checks, setChecks] = useState<DiagCheck[] | null>(null);
+  const [tests, setTests] = useState<Record<string, { ok: boolean; detail: string; at: string }>>({});
+  const [running, setRunning] = useState<string | null>(null);
+
+  const runChecks = () => void featureService.diagnostics().then((r) => setChecks(r.checks)).catch((e) => toast(message(e), "error"));
+  useEffect(runChecks, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const interrupted = workflows.filter((w) => w.steps.some((s) => s.status === "interrupted")).length;
+  const denied = state.settings.permissions.filter((p) => p.level === "deny").map((p) => p.label);
+  const local: DiagCheck[] = [
+    { id: "recovery", label: "Workflow recovery", status: interrupted ? "problem" : "ok", detail: interrupted ? `${interrupted} workflow(s) have interrupted steps waiting for review.` : "No interrupted steps." },
+    { id: "perms", label: "Permissions", status: "info", detail: denied.length ? `Off: ${denied.join(", ")}.` : "All tools are allowed or ask." },
+    { id: "notify", label: "Notifications", status: "info", detail: state.settings.notifications ? "On (Windows may still suppress them, e.g. Focus Assist)." : "Off." },
+  ];
+
+  const test = (id: string, fn: () => Promise<string>) => {
+    setRunning(id);
+    void fn()
+      .then((detail) => setTests((t) => ({ ...t, [id]: { ok: true, detail, at: new Date().toLocaleTimeString() } })))
+      .catch((e) => setTests((t) => ({ ...t, [id]: { ok: false, detail: message(e), at: new Date().toLocaleTimeString() } })))
+      .finally(() => setRunning(null));
+  };
+  const tone = (s: DiagCheck["status"]) => (s === "ok" ? "text-success" : s === "problem" ? "text-danger" : "text-fg-muted");
+  const consentTests: { id: string; label: string; what: string; run: () => Promise<string> }[] = [
+    { id: "browser", label: "Test browser", what: "Starts the browser session (opens a browser window).", run: () => featureService.diagnoseBrowser().then((r) => `Browser started in ${r.ms} ms.`) },
+    { id: "voice", label: "Test voice input", what: "Turns the microphone on once; say a few words.", run: () => featureService.voiceListen().then((t) => `Heard: “${t}”`) },
+    { id: "speech", label: "Test speech output", what: "Speaks a short sentence.", run: () => speak("This is a speech test.", state.settings.voiceName, state.settings.speechRate).then(() => "Spoken (you should have heard it).") },
+    { id: "notify", label: "Test notification", what: "Shows a Windows notification.", run: async () => (assistantService.notify("AI Automation", "Test notification"), "Sent to Windows (check that it appeared).") },
+  ];
+
+  return (
+    <Section id="diagnostics" title="Diagnostics" description="Configuration checks only read settings and files: nothing is started or sent. Tests below actually run something and only when you click them.">
+      <div className="py-3">
+        <div className="mb-2 flex items-center justify-between">
+          <p className="text-sm font-medium">Configuration (not run)</p>
+          <Button size="sm" variant="outline" icon={<RefreshCw className="size-3.5" />} onClick={runChecks}>
+            Check again
+          </Button>
+        </div>
+        {!checks && <p className="text-sm text-fg-muted">{assistantService.available ? "Checking…" : "Available in the desktop app."}</p>}
+        <ul className="space-y-1 text-sm">
+          {[...(checks ?? []), ...local].map((c) => (
+            <li key={c.id} className="flex gap-2">
+              <span className={`w-16 shrink-0 text-xs font-medium ${tone(c.status)}`}>{c.status === "ok" ? "ready" : c.status === "problem" ? "problem" : "info"}</span>
+              <span className="min-w-0">
+                <span className="font-medium">{c.label}</span> <span className="text-fg-muted">— {c.detail}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div className="py-3">
+        <p className="mb-2 text-sm font-medium">Tests (run only when you click)</p>
+        <ul className="space-y-2 text-sm">
+          {consentTests.map((t) => (
+            <li key={t.id} className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline" loading={running === t.id} disabled={running !== null || !assistantService.available} onClick={() => test(t.id, t.run)}>
+                {t.label}
+              </Button>
+              <span className="text-xs text-fg-subtle">{t.what}</span>
+              {tests[t.id] && (
+                <span className={tests[t.id].ok ? "text-xs text-success" : "text-xs text-danger"}>
+                  Tested at {tests[t.id].at}: {tests[t.id].ok ? "passed" : "failed"} — {tests[t.id].detail}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
     </Section>
   );
 }

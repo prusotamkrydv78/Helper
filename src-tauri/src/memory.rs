@@ -16,7 +16,7 @@ const MAX_ITEMS: usize = 200;
 const MAX_CHARS: usize = 500;
 /// Budget for memories in the system prompt.
 const PROMPT_CHARS: usize = 4_000;
-pub const CATEGORIES: &[&str] = &["preference", "instruction", "app", "project", "task", "other"];
+pub const CATEGORIES: &[&str] = &["preference", "correction", "instruction", "app", "project", "task", "other"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -694,7 +694,31 @@ mod imp {
                 free.push(json!({ "drive": root, "free_gb": f / 1_073_741_824 }));
             }
         }
-        Ok(json!({ "processes": names, "battery": battery(), "drives": free }))
+        let mut mem = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+        let memory_percent = unsafe { GlobalMemoryStatusEx(&mut mem) }.ok().map(|_| mem.dwMemoryLoad);
+        Ok(json!({
+            "processes": names,
+            "battery": battery(),
+            "drives": free,
+            "memory_percent": memory_percent,
+            "online": super::network()["route_to_internet"],
+            "locked": session_locked(),
+        }))
+    }
+
+    /// The input desktop can't be switched to while the session is locked (or on the secure desktop).
+    fn session_locked() -> bool {
+        use windows::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop, SwitchDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_ACCESS_FLAGS};
+        unsafe {
+            match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(0x0100)) {
+                Ok(d) => {
+                    let locked = SwitchDesktop(d).is_err();
+                    let _ = CloseDesktop(d);
+                    locked
+                }
+                Err(_) => true,
+            }
+        }
     }
 
     pub fn lock() -> Result<(), ToolError> {

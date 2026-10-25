@@ -17,6 +17,72 @@ const SCHEDULES_FILE: &str = "schedules.json";
 const RULES_FILE: &str = "organize_rules.json";
 const TRIGGERS_FILE: &str = "triggers.json";
 const LAYOUTS_FILE: &str = "layouts.json";
+const SKILLS_FILE: &str = "skills.json";
+
+static SKILLS_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_skills_dir(dir: &std::path::Path) {
+    let _ = SKILLS_PATH.set(dir.join(SKILLS_FILE));
+}
+
+/// Enabled skills for the system prompt: named, reusable procedures the user created.
+pub fn skills_prompt() -> Option<String> {
+    let list: Vec<Value> = SKILLS_PATH.get().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok())?;
+    let enabled: Vec<&Value> = list.iter().filter(|s| s["enabled"].as_bool() == Some(true)).collect();
+    if enabled.is_empty() {
+        return None;
+    }
+    let mut s = String::from(
+        "\n\nSkills (procedures the user saved; follow one when the user asks for it by name or the task clearly matches; \
+         every tool call still follows the normal permissions and approvals):\n",
+    );
+    for sk in enabled.iter().take(30) {
+        s.push_str(&format!("- {}: {}\n", sk["name"].as_str().unwrap_or("skill"), sk["description"].as_str().unwrap_or("")));
+        for (i, step) in sk["steps"].as_array().into_iter().flatten().take(15).enumerate() {
+            s.push_str(&format!("    {}. {}\n", i + 1, step.as_str().unwrap_or("")));
+        }
+        if s.len() > 8000 {
+            s.push_str("- (more skills omitted)\n");
+            break;
+        }
+    }
+    Some(s)
+}
+
+#[tauri::command]
+pub fn skills_load(app: AppHandle) -> Result<Value, AppError> {
+    load_list(&app, SKILLS_FILE)
+}
+
+#[tauri::command]
+pub fn skills_save(app: AppHandle, skills: Value) -> Result<(), AppError> {
+    save_list(&app, SKILLS_FILE, skills)
+}
+
+/// Stops everything that can be stopped and reports what couldn't.
+#[tauri::command]
+pub async fn stop_all(state: State<'_, AppState>) -> Result<Value, AppError> {
+    let cancelled = state.cancel_all();
+    let browser_closed = state.browser.shutdown().await;
+    let stuck = crate::desktop::stuck_calls();
+    let mut not_stopped = Vec::new();
+    if stuck > 0 {
+        not_stopped.push(format!("{stuck} desktop action(s) are waiting on an app that isn't responding; they end when the app responds or closes."));
+    }
+    if !browser_closed {
+        not_stopped.push("The browser was busy; it closes as soon as its current action is cancelled.".to_owned());
+    }
+    state.audit.record("user", "stop_all", &json!({}), "completed", Some(&format!("cancelled {cancelled} request(s)")), 0);
+    Ok(json!({ "cancelledRequests": cancelled, "browserClosed": browser_closed, "notStopped": not_stopped }))
+}
+
+/// Keep browser logins between sessions (persistent profile in the app data folder), or not.
+#[tauri::command]
+pub async fn browser_set_persistent(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<(), AppError> {
+    let dir = if enabled { Some(app.path().app_local_data_dir().map_err(|e| AppError::internal(e.to_string()))?.join("browser-profile")) } else { None };
+    state.browser.set_profile(dir).await;
+    Ok(())
+}
 const MAX_BYTES: usize = 5 * 1024 * 1024;
 const MAX_STEPS: usize = 20;
 const MAX_STEP_CHARS: usize = 500;
@@ -242,7 +308,9 @@ pub async fn workflow_plan(state: State<'_, AppState>, goal: String, model: Opti
              Each step is one instruction an assistant with these tools can carry out on its own: {}. \
              Steps may use results of earlier steps. Don't add steps the goal doesn't need. Put sending, \
              deleting or inviting into their own step so the user approves them separately. \
-             Reply with JSON only: {{\"steps\": [\"...\", \"...\"]}}{memory}",
+             If a step only needs some earlier steps (so it could still run when an unrelated step fails), give it \
+             depends_on with those step numbers (1-based); otherwise omit it (it then depends on all earlier steps). \
+             Reply with JSON only: {{\"steps\": [\"...\", {{\"instruction\": \"...\", \"depends_on\": [1]}}]}}{memory}",
             tools.join(", ")
         ) }),
         json!({ "role": "user", "content": goal }),
@@ -263,9 +331,28 @@ fn parse_steps(text: &str) -> Result<Vec<String>, AppError> {
         .and_then(Value::as_array)
         .ok_or_else(bad)?
         .iter()
-        .filter_map(Value::as_str)
-        .map(|s| s.trim().chars().take(MAX_STEP_CHARS).collect::<String>())
-        .filter(|s| !s.is_empty())
+        .enumerate()
+        .filter_map(|(i, s)| {
+            // A step is a string, or {instruction, depends_on}; dependencies become an "[after 1, 2]" prefix
+            // the user can see and edit.
+            let (text, deps) = match s {
+                Value::String(t) => (t.clone(), Vec::new()),
+                Value::Object(o) => (
+                    o.get("instruction").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                    o.get("depends_on").and_then(Value::as_array).map(|d| d.iter().filter_map(Value::as_u64).filter(|n| (*n as usize) <= i && *n > 0).collect()).unwrap_or_default(),
+                ),
+                _ => return None,
+            };
+            let text: String = text.trim().chars().take(MAX_STEP_CHARS).collect();
+            if text.is_empty() {
+                return None;
+            }
+            Some(if deps.is_empty() {
+                text
+            } else {
+                format!("[after {}] {text}", deps.iter().map(u64::to_string).collect::<Vec<_>>().join(", "))
+            })
+        })
         .take(MAX_STEPS)
         .collect();
     if steps.is_empty() {
@@ -282,6 +369,8 @@ mod tests {
     fn parses_fenced_json_and_limits_steps() {
         let s = parse_steps("```json\n{\"steps\": [\" a \", \"\", \"b\"]}\n```").unwrap();
         assert_eq!(s, vec!["a", "b"]);
+        let d = parse_steps("{\"steps\": [\"a\", \"b\", {\"instruction\": \"c\", \"depends_on\": [1, 9]}]}").unwrap();
+        assert_eq!(d[2], "[after 1] c");
         assert!(parse_steps("no json").is_err());
         assert!(parse_steps("{\"steps\": []}").is_err());
         let many = format!("{{\"steps\": [{}]}}", vec!["\"x\""; 30].join(","));

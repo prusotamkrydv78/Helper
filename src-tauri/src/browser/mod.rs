@@ -53,6 +53,43 @@ struct TypeArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TabArgs {
+    /// list | new | switch | close
+    action: String,
+    url: Option<String>,
+    index: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtractArgs {
+    /// tables | links | headings | metadata
+    kind: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FormField {
+    r#ref: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FillArgs {
+    fields: Vec<FormField>,
+}
+
+/// Button/link text that suggests spending money or committing to something.
+fn looks_like_purchase(label: &str) -> bool {
+    let l = label.to_lowercase();
+    ["buy", "purchase", "pay", "checkout", "check out", "place order", "order now", "complete order", "subscribe", "donate", "book now", "confirm booking", "add to cart"]
+        .iter()
+        .any(|w| l.contains(w))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     query: String,
 }
@@ -90,7 +127,31 @@ pub async fn approval_reason(
 ) -> Result<Option<String>, ToolError> {
     let ask = perms.browser == PermissionLevel::Ask;
     match spec.name {
-        "browser_open" | "browser_get_page_content" | "browser_search" => Ok(None),
+        "browser_open" | "browser_get_page_content" | "browser_search" | "browser_extract" => Ok(None),
+        "browser_tabs" => {
+            let a: TabArgs = parse(args)?;
+            Ok((ask && a.action == "close").then(|| format!("Closes browser tab {}", a.index.unwrap_or(0))))
+        }
+        "browser_fill_form" => {
+            let a: FillArgs = parse(args)?;
+            if a.fields.is_empty() || a.fields.len() > 30 {
+                return Err(ToolError::invalid("Give 1–30 fields."));
+            }
+            let mut lines = Vec::new();
+            let mut sensitive = false;
+            for f in &a.fields {
+                let info = worker.call("describe", json!({ "ref": f.r#ref }), ACTION_TIMEOUT, cancel).await?;
+                if info["isFileInput"].as_bool() == Some(true) {
+                    return Err(ToolError::new("not_supported", "File uploads are not supported."));
+                }
+                let is_sensitive = info["isSensitiveInput"].as_bool() == Some(true);
+                sensitive |= is_sensitive;
+                let label = short(info["text"].as_str().unwrap_or(&f.r#ref), 40);
+                lines.push(if is_sensitive { format!("• {label}: (password/payment field)") } else { format!("• {label}: “{}”", short(&f.text, 60)) });
+            }
+            // Filling never submits; sensitive fields always ask.
+            Ok((ask || sensitive).then(|| format!("Fill {} field(s) (not submitted):\n{}", a.fields.len(), lines.join("\n"))))
+        }
         "browser_click" => {
             let a: RefArgs = parse(args)?;
             let info = worker.call("describe", json!({ "ref": a.r#ref }), ACTION_TIMEOUT, cancel).await?;
@@ -98,6 +159,9 @@ pub async fn approval_reason(
                 return Err(ToolError::new("not_supported", "File uploads are not supported."));
             }
             let label = short(info["text"].as_str().unwrap_or(&a.r#ref), 60);
+            if looks_like_purchase(&label) {
+                return Ok(Some(format!("POSSIBLE PURCHASE OR PAYMENT: clicks “{label}”. Check the price and details before approving.")));
+            }
             if info["submitsForm"].as_bool() == Some(true) {
                 let target = info["formAction"].as_str().unwrap_or("this site");
                 return Ok(Some(format!("Submits a form (“{label}”) to {}", short(target, 80))));
@@ -180,6 +244,46 @@ pub async fn execute(
             Ok(ToolOutput {
                 summary: format!("Typed {} chars{}", a.text.chars().count(), if a.submit { " and submitted" } else { "" }),
                 content: json!({ "note": UNTRUSTED_NOTE, "result": r }),
+                file: None,
+            })
+        }
+        "browser_tabs" => {
+            let a: TabArgs = parse(args)?;
+            let r = match a.action.as_str() {
+                "list" => worker.call("tabs", json!({}), ACTION_TIMEOUT, cancel).await?,
+                "new" => {
+                    let url = url_policy::validate(a.url.as_deref().unwrap_or_default()).await?;
+                    worker.call("tab_new", json!({ "url": url.as_str() }), NAV_TIMEOUT, cancel).await?
+                }
+                "switch" | "close" => {
+                    let index = a.index.ok_or_else(|| ToolError::invalid("Give the tab `index` from the tab list."))?;
+                    worker.call(if a.action == "switch" { "tab_switch" } else { "tab_close" }, json!({ "index": index }), ACTION_TIMEOUT, cancel).await?
+                }
+                other => return Err(ToolError::invalid(format!("`action` must be list, new, switch or close, not `{other}`."))),
+            };
+            let n = r["tabs"].as_array().map(Vec::len).unwrap_or(0);
+            Ok(ToolOutput { summary: format!("{} · {n} tab(s)", a.action), content: json!({ "note": UNTRUSTED_NOTE, "result": r }), file: None })
+        }
+        "browser_extract" => {
+            let a: ExtractArgs = parse(args)?;
+            let r = worker.call("extract", json!({ "kind": a.kind }), ACTION_TIMEOUT, cancel).await?;
+            Ok(ToolOutput {
+                summary: format!("Extracted {} from “{}”", a.kind, short(r["title"].as_str().unwrap_or(""), 50)),
+                content: json!({ "note": UNTRUSTED_NOTE, "result": r }),
+                file: None,
+            })
+        }
+        "browser_fill_form" => {
+            let a: FillArgs = parse(args)?;
+            let mut results = Vec::new();
+            for f in &a.fields {
+                let r = worker.call("type", json!({ "ref": f.r#ref, "text": f.text, "submit": false }), ACTION_TIMEOUT, cancel).await;
+                results.push(json!({ "ref": f.r#ref, "ok": r.is_ok(), "error": r.err().map(|e| e.message) }));
+            }
+            let ok = results.iter().filter(|r| r["ok"] == true).count();
+            Ok(ToolOutput {
+                summary: format!("Filled {ok} of {} fields (not submitted)", a.fields.len()),
+                content: json!({ "fields": results, "note": "Nothing was submitted. Read the page to check, then submit with browser_click (asks the user)." }),
                 file: None,
             })
         }

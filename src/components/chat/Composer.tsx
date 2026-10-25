@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import { ArrowUp, Mic, MicOff, Paperclip, Square, X } from "lucide-react";
-import { featureService } from "../../services/tauri/assistant";
+import { featureService, type Skill } from "../../services/tauri/assistant";
+import { useWorkflows } from "../../store/WorkflowStore";
 import { stopSpeaking } from "../../lib/speech";
 import type { Attachment } from "../../types";
 import { cn, formatBytes, uid } from "../../lib/utils";
@@ -53,10 +54,10 @@ export const Composer = forwardRef<ComposerHandle, { streaming: boolean; onStop:
     listenRef.current = listen;
     // The global "voice" shortcut starts push-to-talk here.
     useEffect(() => {
-      const start = () => state.settings.voiceInput && listenRef.current();
+      const start = () => state.settings.voiceInput && !state.settings.voiceConversation && listenRef.current();
       window.addEventListener("jarvis:voice", start);
       return () => window.removeEventListener("jarvis:voice", start);
-    }, [state.settings.voiceInput]);
+    }, [state.settings.voiceInput, state.settings.voiceConversation]);
 
     useImperativeHandle(ref, () => ({
       focus: () => ta.current?.focus(),
@@ -78,6 +79,7 @@ export const Composer = forwardRef<ComposerHandle, { streaming: boolean; onStop:
     }, [text]);
 
     const canSend = text.trim().length > 0 && !streaming;
+    const suggestions = useSuggestions(text);
 
     function submit() {
       if (!canSend) return;
@@ -161,6 +163,30 @@ export const Composer = forwardRef<ComposerHandle, { streaming: boolean; onStop:
               large ? "min-h-[84px]" : "min-h-[52px]",
             )}
           />
+          {suggestions.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 px-3 pb-1 text-xs">
+              <span className="text-fg-subtle">Matching:</span>
+              {suggestions.map((sg) => (
+                <button
+                  key={sg.key}
+                  type="button"
+                  className="rounded-full border border-border px-2 py-0.5 hover:bg-surface-2"
+                  title={`Runs “${sg.label}” as a workflow (its steps still ask before consequential actions)`}
+                  onClick={() => {
+                    try {
+                      sg.run();
+                      setText("");
+                      toast(`Started “${sg.label}”. Follow it on the Workflows page.`, "success");
+                    } catch (e) {
+                      toast(e instanceof Error ? e.message : "Couldn't start it", "error");
+                    }
+                  }}
+                >
+                  ▶ {sg.label}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5">
             <div className="flex items-center gap-1">
               <input ref={fileInput} type="file" multiple hidden onChange={(e) => onFiles(e.target.files)} />
@@ -228,3 +254,29 @@ export const Composer = forwardRef<ComposerHandle, { streaming: boolean; onStop:
     );
   },
 );
+
+/** Existing skills and workflow templates whose name/description match what's being typed. Nothing runs until clicked. */
+function useSuggestions(text: string): { key: string; label: string; run: () => void }[] {
+  const { workflows, actions: wf } = useWorkflows();
+  const [skills, setSkills] = useState<Skill[]>([]);
+  useEffect(() => {
+    void featureService.skillsLoad().then(setSkills).catch(() => {});
+  }, []);
+  const words = text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 4);
+  if (words.length < 2) return [];
+  const score = (hay: string) => {
+    const h = hay.toLowerCase();
+    return words.filter((w) => h.includes(w)).length;
+  };
+  const out: { key: string; label: string; score: number; run: () => void }[] = [];
+  for (const sk of skills.filter((x) => x.enabled && x.steps.length)) {
+    const sc = score(`${sk.name} ${sk.description}`);
+    if (sc >= 2)
+      out.push({ key: sk.id, label: sk.name, score: sc, run: () => wf.start(wf.create({ title: `Skill: ${sk.name}`, goal: sk.description || sk.name, steps: sk.steps })) });
+  }
+  for (const w of workflows.filter((x) => x.template)) {
+    const sc = score(`${w.title} ${w.goal}`);
+    if (sc >= 2) out.push({ key: w.id, label: w.title, score: sc, run: () => void wf.runCopy(w.id, "suggested", "manual") });
+  }
+  return out.sort((a, b) => b.score - a.score).slice(0, 3);
+}

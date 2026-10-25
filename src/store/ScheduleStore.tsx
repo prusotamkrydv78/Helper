@@ -3,6 +3,9 @@ import type { ID, Schedule, Trigger } from "../types";
 import { nowISO, uid } from "../lib/utils";
 import { scheduleService, triggerService, type TriggerState } from "../services/tauri/workflows";
 import { useNotifications } from "./NotificationStore";
+import { useStore } from "./AppStore";
+import { assistantService } from "../services/tauri/assistant";
+import { load, save } from "../lib/storage";
 import { useWorkflows } from "./WorkflowStore";
 
 /**
@@ -81,6 +84,9 @@ interface ScheduleValue {
   remove(id: ID): void;
   triggers: Trigger[];
   saveTriggers(list: Trigger[]): Promise<void>;
+  briefing: Briefing | null;
+  /** Builds a fresh briefing now. */
+  refreshBriefing(): Promise<void>;
   clearAll(): Promise<void>;
 }
 
@@ -90,7 +96,13 @@ const errorText = (e: unknown) =>
   (e && typeof e === "object" && "message" in e ? String((e as { message: unknown }).message) : String(e)) || "Unknown error";
 
 export function ScheduleProvider({ children }: { children: ReactNode }) {
-  const { actions: wf, loaded: workflowsLoaded } = useWorkflows();
+  const { actions: wf, loaded: workflowsLoaded, workflows } = useWorkflows();
+  const { state: app } = useStore();
+  const appRef = useRef(app);
+  appRef.current = app;
+  const workflowsRef = useRef(workflows);
+  workflowsRef.current = workflows;
+  const [briefing, setBriefing] = useState<Briefing | null>(() => load<Briefing | null>("briefing", null));
   const { push } = useNotifications();
   const pushRef = useRef(push);
   pushRef.current = push;
@@ -195,12 +207,83 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
         }
       }
       await checkTriggers();
+      await maybeBriefing();
     } catch (e) {
       setError(errorText(e));
     } finally {
       ticking.current = false;
     }
   }, [patch]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Assembles a briefing from real data only; unavailable sources are named, never guessed. */
+  const buildBriefing = async (): Promise<Briefing> => {
+    const st = appRef.current;
+    const sections: BriefingSection[] = [];
+    const cal = await assistantService.briefingCalendar(st.settings.briefingHours).catch((e) => e as Error);
+    if (cal instanceof Error || !cal) {
+      sections.push({ title: "Calendar", lines: [cal instanceof Error ? `Couldn't read calendars: ${cal.message}` : "Calendars are only available in the desktop app."] });
+    } else {
+      for (const a of cal.accounts) {
+        if (a.status === "not_configured") continue;
+        const lines =
+          a.status === "ok"
+            ? (a.events ?? []).length
+              ? (a.events ?? []).slice(0, 15).map((e) => {
+                  // Microsoft gives UTC without a zone (and 7 decimals); Google gives RFC 3339 or a date for all-day events.
+                  const when = e.all_day
+                    ? "All day"
+                    : e.start_utc
+                      ? new Date(`${e.start_utc.slice(0, 19)}Z`).toLocaleString()
+                      : e.start
+                        ? new Date(e.start).toLocaleString()
+                        : "time unknown";
+                  return `${when} — ${e.subject ?? "(no title)"}${e.location ? ` @ ${e.location}` : ""}`;
+                })
+              : [`No events in the next ${st.settings.briefingHours} hours.`]
+            : [a.status === "not_connected" ? "Not connected — reconnect in Settings to include it." : `Unavailable: ${a.error ?? "unknown error"}`];
+        sections.push({ title: a.service, lines });
+      }
+    }
+    const end = Date.now() + st.settings.briefingHours * 3_600_000;
+    const reminders = ref.current.filter((x) => x.enabled && x.action === "reminder" && x.nextRunAt && Date.parse(x.nextRunAt) <= end);
+    sections.push({ title: "Reminders", lines: reminders.length ? reminders.map((r) => `${new Date(r.nextRunAt!).toLocaleString()} — ${r.message}`) : ["None scheduled."] });
+    const approvals = Object.values(st.tasks).flatMap((t) => t.steps.filter((x) => x.status === "awaiting_approval").map((x) => x.approvalReason || x.title));
+    sections.push({ title: "Waiting for your approval", lines: approvals.length ? approvals : ["Nothing."] });
+    const wfs = workflowsRef.current;
+    const interrupted = wfs.filter((w) => w.steps.some((x) => x.status === "interrupted")).map((w) => w.title);
+    const unfinished = wfs.filter((w) => !w.template && (w.status === "paused" || w.status === "failed" || w.status === "running")).map((w) => `${w.title} (${w.status})`);
+    sections.push({ title: "Interrupted workflows", lines: interrupted.length ? interrupted : ["None."] });
+    sections.push({ title: "Unfinished workflows", lines: unfinished.length ? unfinished : ["None."] });
+    return { generatedAt: new Date().toISOString(), sections };
+  };
+
+  const refreshBriefing = useCallback(async () => {
+    const b = await buildBriefing();
+    setBriefing(b);
+    save("briefing", b);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Once a day after the configured time (or once when the app opens later that day). */
+  const maybeBriefing = async () => {
+    const st = appRef.current.settings;
+    if (!st.briefingEnabled) return;
+    const [h, m] = st.briefingTime.split(":").map(Number);
+    const due = new Date();
+    due.setHours(h || 0, m || 0, 0, 0);
+    const today = new Date().toDateString();
+    if (Date.now() < due.getTime() || load<string>("briefingDay", "") === today) return;
+    save("briefingDay", today);
+    const b = await buildBriefing();
+    setBriefing(b);
+    save("briefing", b);
+    const count = (t: string) => b.sections.find((x) => x.title === t)?.lines.filter((l) => !/^(None|Nothing)/.test(l)).length ?? 0;
+    pushRef.current({
+      kind: "reminder",
+      title: "Your daily briefing",
+      body: `${count("Waiting for your approval")} approval(s), ${count("Reminders")} reminder(s), ${count("Unfinished workflows")} unfinished workflow(s). Open the Command Center for details.`,
+      target: { view: "home" },
+    });
+  };
 
   /** Evaluates enabled triggers against the current system state; fires on the change to true, after the cooldown. */
   const checkTriggers = async () => {
@@ -290,9 +373,11 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
       remove: (id) => void commit((list) => list.filter((s) => s.id !== id)).catch(() => {}),
       triggers,
       saveTriggers,
+      briefing,
+      refreshBriefing,
       clearAll: () => commit(() => []),
     }),
-    [schedules, loaded, error, commit, patch, triggers, saveTriggers],
+    [schedules, loaded, error, commit, patch, triggers, saveTriggers, briefing, refreshBriefing],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -323,4 +408,14 @@ function evaluate(t: Trigger, st: TriggerState): string | null {
       return low ? `${low.drive} has ${low.free_gb} GB free (below ${limit} GB)` : null;
     }
   }
+}
+
+export interface BriefingSection {
+  title: string;
+  lines: string[];
+}
+
+export interface Briefing {
+  generatedAt: string;
+  sections: BriefingSection[];
 }

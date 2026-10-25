@@ -70,6 +70,10 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
 /// Registered global shortcuts and their actions (summon | voice | pause | stop).
 static SHORTCUTS: Mutex<Vec<(Shortcut, String)>> = Mutex::new(Vec::new());
 
+pub fn registered_shortcuts() -> usize {
+    SHORTCUTS.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
 /// The global-shortcut plugin: "summon" shows the window and "stop" cancels all
 /// running requests here; every action is also sent to the UI as a "shortcut" event.
 pub fn shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {

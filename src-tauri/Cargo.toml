@@ -58,6 +58,7 @@ windows = { version = "0.58", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Power",
     "Win32_System_Shutdown",
+    "Win32_System_StationsAndDesktops",
     "Win32_NetworkManagement_WiFi",
     "Win32_Devices_FunctionDiscovery",
     "Win32_UI_Shell_PropertiesSystem",

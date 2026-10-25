@@ -7,10 +7,12 @@ mod system;
 mod browser;
 mod commands;
 mod config;
+mod diagnostics;
 mod desktop;
 mod error;
 mod google;
 mod graph;
+mod library;
 mod state;
 mod tools;
 mod voice;
@@ -44,6 +46,7 @@ pub fn run() {
             let config_dir = app.path().app_config_dir()?;
             tools::fs_ops::set_journal_dir(&config_dir);
             desktop::set_layout_dir(&config_dir);
+            workflows::set_skills_dir(&config_dir);
             let state = state::AppState::new(&config_dir);
             // Close the browser session after a period of inactivity.
             let browser = std::sync::Arc::clone(&state.browser);
@@ -54,6 +57,7 @@ pub fn run() {
                 }
             });
             Arc::clone(&state.clipboard).watch();
+            state.library.start(&config_dir, app.handle().clone());
             app.manage(state);
             background::setup(app)?;
             Ok(())
@@ -101,6 +105,19 @@ pub fn run() {
             background::shortcuts_set,
             voice::voice_listen,
             voice::voice_cancel,
+            voice::voice_wait_for_phrase,
+            library::library_status,
+            library::library_set_folders,
+            library::library_query,
+            workflows::skills_load,
+            workflows::skills_save,
+            workflows::stop_all,
+            workflows::browser_set_persistent,
+            desktop::screen_analyze,
+            desktop::screen_windows,
+            diagnostics::diagnostics,
+            diagnostics::diagnose_browser,
+            diagnostics::briefing_calendar,
             clipboard::clipboard_history_get,
             clipboard::clipboard_history_set_enabled,
             clipboard::clipboard_history_pin,

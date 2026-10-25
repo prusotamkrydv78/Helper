@@ -195,7 +195,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -375,10 +375,64 @@ pub struct DocSearchArgs {
     pub top: Option<usize>,
 }
 
-struct Chunk {
-    file: PathBuf,
-    line: usize,
-    text: String,
+#[derive(Clone)]
+pub struct Chunk {
+    pub file: PathBuf,
+    pub line: usize,
+    pub text: String,
+}
+
+/// Text documents under `dir` with their modification time and size.
+pub fn document_files(dir: &Path) -> Vec<(PathBuf, std::time::SystemTime, u64)> {
+    let mut truncated = false;
+    files_under(dir, true, MAX_DEPTH, &mut truncated)
+        .into_iter()
+        .filter(|(p, size)| *size <= MAX_CONTENT_BYTES && DOC_EXTS.iter().any(|e| lower_name(p).ends_with(&format!(".{e}"))))
+        .filter_map(|(p, size)| {
+            let t = fs::metadata(&p).ok()?.modified().ok()?;
+            Some((p, t, size))
+        })
+        .collect()
+}
+
+/// Passages of one text document (None for binary or unreadable files).
+pub fn read_chunks(p: &Path) -> Option<Vec<Chunk>> {
+    let bytes = fs::read(p).ok()?;
+    if bytes.iter().take(8192).any(|b| *b == 0) {
+        return None;
+    }
+    let mut out = Vec::new();
+    chunks_of(p, &String::from_utf8_lossy(&bytes), &mut out);
+    Some(out)
+}
+
+/// TF-IDF ranking of passages for a question; best first.
+pub fn rank<'a>(chunks: &[&'a Chunk], question: &str, top: usize) -> Vec<(f64, &'a Chunk)> {
+    let q = terms(question);
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let lowered: Vec<String> = chunks.iter().map(|c| c.text.to_lowercase()).collect();
+    let n = lowered.len().max(1) as f64;
+    let idf: Vec<f64> = q.iter().map(|t| (1.0 + n / (1.0 + lowered.iter().filter(|c| c.contains(t.as_str())).count() as f64)).ln()).collect();
+    let mut scored: Vec<(f64, &'a Chunk)> = lowered
+        .iter()
+        .enumerate()
+        .filter_map(|(i, text)| {
+            let s: f64 = q
+                .iter()
+                .zip(&idf)
+                .map(|(t, w)| {
+                    let tf = text.matches(t.as_str()).count();
+                    if tf == 0 { 0.0 } else { (1.0 + (tf as f64).ln()) * w }
+                })
+                .sum();
+            (s > 0.0).then_some((s, chunks[i]))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(top);
+    scored
 }
 
 /// Paragraph-aligned chunks of about CHUNK_CHARS characters.

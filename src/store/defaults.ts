@@ -3,7 +3,7 @@ import type { Settings, ToolPermission } from "../types";
 export const DEFAULT_PERMISSIONS: ToolPermission[] = [
   { tool: "fs.read", label: "Read files", description: "List folders and read file contents", level: "allow", risk: "low" },
   { tool: "fs.write", label: "Create & modify files", description: "Write, move and rename files", level: "ask", risk: "medium" },
-  { tool: "fs.delete", label: "Delete files", description: "Remove files and folders", level: "ask", risk: "high" },
+  { tool: "fs.delete", label: "Delete files", description: "Move files/folders inside allowed folders to the Recycle Bin. Every deletion shows all targets and asks; Deny hides the tool.", level: "deny", risk: "high" },
   { tool: "browser", label: "Browser actions", description: "Open pages, search and read freely. Ask = approve each click and typed entry. Form submits, password fields and downloads always ask.", level: "ask", risk: "medium" },
   { tool: "shell", label: "Terminal commands", description: "Run commands in PowerShell", level: "ask", risk: "high" },
   { tool: "system", label: "System info & actions", description: "Read CPU, memory, disks, network and processes. Ending a process always asks; system and admin processes are refused.", level: "ask", risk: "medium" },

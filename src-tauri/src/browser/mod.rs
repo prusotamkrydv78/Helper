@@ -285,7 +285,7 @@ mod e2e {
         let _ = std::fs::remove_dir_all(&dl);
         std::fs::create_dir_all(&dl).unwrap();
         let guard = PathGuard::new(&[dl.clone()]);
-        let perms = ToolPermissions { read: PermissionLevel::Allow, write: PermissionLevel::Ask, browser: PermissionLevel::Allow, apps: PermissionLevel::Deny, system: PermissionLevel::Deny, m365: PermissionLevel::Deny, google: PermissionLevel::Deny, input: PermissionLevel::Deny, clipboard: PermissionLevel::Deny };
+        let perms = ToolPermissions { read: PermissionLevel::Allow, write: PermissionLevel::Ask, browser: PermissionLevel::Allow, apps: PermissionLevel::Deny, system: PermissionLevel::Deny, m365: PermissionLevel::Deny, google: PermissionLevel::Deny, input: PermissionLevel::Deny, clipboard: PermissionLevel::Deny, delete: PermissionLevel::Deny };
 
         let run = |name: &'static str, args: Value| {
             let (w, g, c) = (&worker, &guard, &cancel);

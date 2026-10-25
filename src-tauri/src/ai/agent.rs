@@ -42,6 +42,7 @@ fn level(perms: ToolPermissions, kind: ToolKind) -> PermissionLevel {
         ToolKind::Graph => perms.m365,
         ToolKind::Google => perms.google,
         ToolKind::Clipboard => perms.clipboard,
+        ToolKind::Delete => perms.delete,
     }
 }
 
@@ -63,6 +64,7 @@ fn offered_tools(state: &AppState, guard: &PathGuard, perms: ToolPermissions, ha
                     && (t.name != "app_input" || perms.input != PermissionLevel::Deny)
             }
             ToolKind::Clipboard => cfg!(windows) && perms.clipboard != PermissionLevel::Deny,
+            ToolKind::Delete => cfg!(windows) && guard.has_roots() && perms.delete != PermissionLevel::Deny,
             ToolKind::Memory => true,
             ToolKind::System => cfg!(windows) && perms.system != PermissionLevel::Deny,
             ToolKind::Graph => perms.m365 != PermissionLevel::Deny && state.graph.connected(),
@@ -276,8 +278,8 @@ async fn execute_calls(
             title: p.spec.map(|s| s.title).unwrap_or("Unknown tool").to_owned(),
             arguments: p.args.as_ref().map(display_args).unwrap_or_else(|_| Value::String(p.call.arguments.clone())),
             // Browser approvals depend on the target element and are decided when the call runs.
-            requires_approval: p.spec.is_some_and(|s| !matches!(s.kind, ToolKind::Browser | ToolKind::Desktop | ToolKind::System | ToolKind::Graph | ToolKind::Google | ToolKind::Clipboard)
-                    && s.name != "move_files")
+            requires_approval: p.spec.is_some_and(|s| !matches!(s.kind, ToolKind::Browser | ToolKind::Desktop | ToolKind::System | ToolKind::Graph | ToolKind::Google | ToolKind::Clipboard | ToolKind::Delete)
+                    && !matches!(s.name, "move_files" | "copy_files" | "rename_files" | "organize_files"))
                 && p.level == PermissionLevel::Ask,
             read_only: p.spec.is_some_and(|s| s.kind == ToolKind::Read),
         });
@@ -377,11 +379,16 @@ async fn run_one(
             Ok(r) => r,
             Err(e) => return Ok(fail(emit, id, &e, ToolCallStatus::Failed)),
         }
-    } else if spec.name == "move_files" {
-        // Show every move; replacing existing files always asks.
-        let overwrite = args.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
-        if p.level == PermissionLevel::Ask || overwrite {
-            match tools::fs_ops::move_preview(guard, &args) {
+    } else if spec.kind == ToolKind::Delete {
+        // Deleting always asks and lists every target, even when the permission is Allow.
+        match tools::fs_ops::delete_preview(guard, &args) {
+            Ok(preview) => Some(preview),
+            Err(e) => return Ok(fail(emit, id, &e, ToolCallStatus::Failed)),
+        }
+    } else if let Some(always) = tools::fs_ops::needs_preview(guard, spec.name, &args) {
+        // Batch file changes show every change; replacing existing files always asks.
+        if p.level == PermissionLevel::Ask || always {
+            match tools::fs_ops::preview(guard, spec.name, &args) {
                 Ok(preview) => Some(preview),
                 Err(e) => return Ok(fail(emit, id, &e, ToolCallStatus::Failed)),
             }
@@ -537,16 +544,55 @@ async fn run_one(
         }
     } else {
         let g = Arc::clone(guard);
-        let task = tauri::async_runtime::spawn_blocking(move || tools::execute(spec, &args, &g));
-        let outcome = tokio::select! {
-            _ = cancel.cancelled() => {
-                status(emit, id, ToolCallStatus::Cancelled);
-                return Err(AppError::cancelled());
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, mut progress) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let ctx = tools::ctx::Ctx { cancel: Arc::clone(&stop), progress: tx };
+        let mut task = tauri::async_runtime::spawn_blocking(move || tools::ctx::with(ctx, || tools::execute(spec, &args, &g)));
+        let limit = if tools::is_long_running(spec.name) { tools::LONG_TOOL_TIMEOUT } else { TOOL_TIMEOUT };
+        let deadline = tokio::time::sleep(limit);
+        tokio::pin!(deadline);
+        let outcome = loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    // Let bulk operations stop between items and report what they completed.
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if let Ok(Ok(Ok(partial))) = tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+                        state.audit.record(&req.request_id, spec.name, &audit_args, "cancelled", Some(&partial.summary), started.elapsed().as_millis());
+                        emit(StreamEvent::ToolStatus {
+                            call_id: id.to_owned(),
+                            status: ToolCallStatus::Cancelled,
+                            summary: Some(partial.summary),
+                            output: Some(truncate(&serde_json::to_string_pretty(&partial.content).unwrap_or_default(), UI_OUTPUT_LIMIT)),
+                            error: Some("Stopped. Completed items are listed; nothing else was changed.".into()),
+                            file: None,
+                        });
+                    } else {
+                        status(emit, id, ToolCallStatus::Cancelled);
+                    }
+                    return Err(AppError::cancelled());
+                }
+                Some(msg) = progress.recv() => {
+                    emit(StreamEvent::ToolStatus {
+                        call_id: id.to_owned(),
+                        status: ToolCallStatus::Running,
+                        summary: Some(msg),
+                        output: None,
+                        error: None,
+                        file: None,
+                    });
+                }
+                r = &mut task => break Ok(r),
+                _ = &mut deadline => {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break Err(());
+                }
             }
-            r = tokio::time::timeout(TOOL_TIMEOUT, task) => r,
         };
         match outcome {
-            Err(_) => Err(ToolError::timeout()),
+            Err(_) => Err(ToolError::new(
+                "timeout",
+                format!("The tool didn't finish within {} minutes; it was asked to stop. Check what changed before retrying.", limit.as_secs() / 60),
+            )),
             Ok(Err(join)) => Err(ToolError::new("internal_error", format!("Tool crashed: {join}"))),
             Ok(Ok(r)) => r,
         }

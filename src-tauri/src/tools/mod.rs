@@ -4,6 +4,55 @@
 pub mod allowed_dirs;
 pub mod fs;
 pub mod fs_ops;
+
+/// Per-call context for blocking tools: cancellation and progress, without
+/// threading parameters through every function. Unset (tests) means "never
+/// cancelled, progress ignored".
+pub mod ctx {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    pub struct Ctx {
+        pub cancel: Arc<AtomicBool>,
+        pub progress: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+
+    thread_local! {
+        static CURRENT: RefCell<Option<(Ctx, Instant)>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `f` with `c` as the current context on this thread.
+    pub fn with<R>(c: Ctx, f: impl FnOnce() -> R) -> R {
+        CURRENT.with(|cur| *cur.borrow_mut() = Some((c, Instant::now() - Duration::from_secs(1))));
+        let r = f();
+        CURRENT.with(|cur| *cur.borrow_mut() = None);
+        r
+    }
+
+    pub fn cancelled() -> bool {
+        CURRENT.with(|cur| cur.borrow().as_ref().is_some_and(|(c, _)| c.cancel.load(Ordering::Relaxed)))
+    }
+
+    /// Progress text for the UI, at most every 400 ms.
+    pub fn report(msg: impl Into<String>) {
+        CURRENT.with(|cur| {
+            if let Some((c, last)) = cur.borrow_mut().as_mut() {
+                if last.elapsed() >= Duration::from_millis(400) {
+                    *last = Instant::now();
+                    let _ = c.progress.send(msg.into());
+                }
+            }
+        });
+    }
+}
+
+/// Tools that may run for minutes (bulk file work): longer limit, progress, Stop between items.
+pub fn is_long_running(name: &str) -> bool {
+    matches!(name, "search_files" | "find_duplicates" | "move_files" | "copy_files" | "delete_files" | "rename_files" | "organize_files")
+}
+pub const LONG_TOOL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub mod paths;
 
 use std::borrow::Cow;
@@ -38,6 +87,8 @@ pub enum ToolKind {
     Google,
     /// Clipboard text.
     Clipboard,
+    /// Deletes files (to the Recycle Bin); always asks.
+    Delete,
 }
 
 pub struct ToolSpec {
@@ -521,12 +572,22 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "search_files",
         title: "Search files",
-        description: "Find files by name in a permitted folder (case-insensitive, * wildcards, e.g. *.pdf). Up to 200 matches with sizes.",
+        description: "Find files in a permitted folder by name (* wildcards), extension, modified date, size and/or text inside them (text files up to 2 MB; returns line and snippet). Up to 200 matches.",
         kind: ToolKind::Read,
         parameters: || json!({
             "type": "object",
-            "properties": { "path": { "type": "string" }, "pattern": { "type": "string" }, "recursive": { "type": "boolean" } },
-            "required": ["path", "pattern"],
+            "properties": {
+                "path": { "type": "string" },
+                "pattern": { "type": "string", "description": "Name pattern, e.g. *.pdf (default all)." },
+                "recursive": { "type": "boolean" },
+                "contains": { "type": "string", "description": "Text to find inside files (case-insensitive)." },
+                "extensions": { "type": "array", "items": { "type": "string" } },
+                "modified_after": { "type": "string", "description": "YYYY-MM-DD" },
+                "modified_before": { "type": "string", "description": "YYYY-MM-DD" },
+                "min_size": { "type": "integer", "description": "Bytes." },
+                "max_size": { "type": "integer", "description": "Bytes." }
+            },
+            "required": ["path"],
             "additionalProperties": false
         }),
     },
@@ -545,7 +606,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "move_files",
         title: "Move/rename files",
-        description: "Move or rename up to 100 files inside permitted folders in one batch. The user sees every move before it runs; each result is checked on disk. Never overwrites unless overwrite is true.",
+        description: "Move or rename up to 500 files or folders inside permitted folders in one batch (across drives: copy, verify, then remove the source). The user sees every move before it runs; each result is checked on disk. Never overwrites unless overwrite is true.",
         kind: ToolKind::Write,
         parameters: || json!({
             "type": "object",
@@ -623,6 +684,126 @@ pub const TOOLS: &[ToolSpec] = &[
             "type": "object",
             "properties": { "text": { "type": "string" } },
             "required": ["text"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "copy_files",
+        title: "Copy files",
+        description: "Copy files or whole folders (recursively, structure kept, max 20,000 files) inside permitted folders. on_conflict: skip (default), rename (\"name (2).ext\") or overwrite (always asks). Each copy is verified by size and SHA-256.",
+        kind: ToolKind::Write,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "copies": { "type": "array", "items": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string", "description": "Full destination path including the file name." } }, "required": ["from", "to"], "additionalProperties": false } }, "on_conflict": { "type": "string", "enum": ["skip", "rename", "overwrite"] } },
+            "required": ["copies"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "delete_files",
+        title: "Delete files",
+        description: "Move up to 100 files (or folders, with include_folders) inside permitted folders to the Recycle Bin. The user sees every target and must approve; permitted folders themselves are protected. Results are checked on disk.",
+        kind: ToolKind::Delete,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "paths": { "type": "array", "items": { "type": "string" } }, "include_folders": { "type": "boolean" } },
+            "required": ["paths"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "system_lock",
+        title: "Lock computer",
+        description: "Lock the Windows session (LockWorkStation). Always asks.",
+        kind: ToolKind::System,
+        parameters: || json!({
+            "type": "object",
+            "properties": {  },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "rename_files",
+        title: "Batch rename",
+        description: "Rename files in one permitted folder using a template ({name} {ext} {n} {n:3} {date} {year} {month}, e.g. Invoice_{n:3}_{date}.{ext}) and/or find/replace. The user sees every new name before anything changes; never overwrites.",
+        kind: ToolKind::Write,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" }, "pattern": { "type": "string", "description": "Which files, e.g. *.jpg (default all)." }, "template": { "type": "string" }, "find": { "type": "string" }, "replace": { "type": "string" } },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "organize_files",
+        title: "Organize folder",
+        description: "Move the files of a permitted folder into subfolders by extension, year or month (created as needed). The user sees every move first; never overwrites.",
+        kind: ToolKind::Write,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" }, "by": { "type": "string", "enum": ["extension", "year", "month"] }, "pattern": { "type": "string" } },
+            "required": ["path", "by"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "system_audio_devices",
+        title: "Audio devices",
+        description: "List active speakers/headphones and microphones and which are the defaults. Changing the default device is done in Settings (no public API).",
+        kind: ToolKind::System,
+        parameters: || json!({
+            "type": "object",
+            "properties": {  },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "system_set_microphone",
+        title: "Microphone mute",
+        description: "Mute or unmute the default microphone. Always asks; the new state is read back.",
+        kind: ToolKind::System,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "mute": { "type": "boolean" } },
+            "required": ["mute"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "system_wifi_status",
+        title: "Wi-Fi status",
+        description: "Current Wi-Fi network and visible networks (signal, secured, saved profile).",
+        kind: ToolKind::System,
+        parameters: || json!({
+            "type": "object",
+            "properties": {  },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "system_wifi",
+        title: "Wi-Fi connect",
+        description: "Connect to a visible Wi-Fi network that has a saved profile, or disconnect. Always asks; the result is verified. New networks needing a password are joined in Settings.",
+        kind: ToolKind::System,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "action": { "type": "string", "enum": ["connect", "disconnect"] }, "ssid": { "type": "string" } },
+            "required": ["action"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "system_power",
+        title: "Power",
+        description: "sleep, restart, shutdown (restart/shutdown are scheduled 60 s ahead with a Windows warning so they can be cancelled) or cancel_shutdown. Always asks with a clear warning.",
+        kind: ToolKind::System,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "action": { "type": "string", "enum": ["sleep", "restart", "shutdown", "cancel_shutdown"] } },
+            "required": ["action"],
             "additionalProperties": false
         }),
     },
@@ -706,6 +887,10 @@ pub fn execute(spec: &ToolSpec, args: &Value, guard: &PathGuard) -> Result<ToolO
         "search_files" => fs_ops::search_files(guard, parse(args)?),
         "find_duplicates" => fs_ops::find_duplicates(guard, parse(args)?),
         "move_files" => fs_ops::move_files(guard, parse(args)?),
+        "copy_files" => fs_ops::copy_files(guard, parse(args)?),
+        "delete_files" => fs_ops::delete_files(guard, parse(args)?),
+        "rename_files" => fs_ops::rename_files(guard, parse(args)?),
+        "organize_files" => fs_ops::organize_files(guard, parse(args)?),
         other => Err(ToolError::invalid(format!("Unknown tool `{other}`."))),
     }
 }

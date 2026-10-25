@@ -409,6 +409,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
             google: s.permissions.find((p) => p.tool === "google")?.level ?? "ask",
             input: s.permissions.find((p) => p.tool === "input")?.level ?? "deny",
             clipboard: s.permissions.find((p) => p.tool === "clipboard")?.level ?? "deny",
+            delete: s.permissions.find((p) => p.tool === "fs.delete")?.level ?? "deny",
           },
         },
         (e) => {
@@ -440,6 +441,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
             }
             case "tool_status": {
               if (!liveTaskId) break;
+              const wasRunning = stepStatus.get(e.callId) === "running";
               stepStatus.set(e.callId, e.status);
               const terminal = e.status !== "running" && e.status !== "awaiting_approval";
               dispatch({
@@ -448,11 +450,12 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
                 stepId: e.callId,
                 patch: {
                   status: e.status,
-                  ...(e.status === "running" ? { startedAt: nowISO() } : {}),
+                  ...(e.status === "running" && !wasRunning ? { startedAt: nowISO() } : {}),
                   ...(terminal ? { finishedAt: nowISO() } : {}),
                   ...(e.output ? { result: { output: e.output, format: "json" as const } } : {}),
                   ...(e.error ? { error: e.error } : {}),
                   ...(e.status === "awaiting_approval" && e.summary ? { approvalReason: e.summary } : {}),
+                  ...(e.status === "running" ? { progress: e.summary ?? undefined } : terminal ? { progress: undefined } : {}),
                 },
               });
               if (e.status === "awaiting_approval")

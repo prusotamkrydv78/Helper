@@ -82,6 +82,9 @@ pub struct ToolPermissions {
     /// Clipboard text (reading always asks).
     #[serde(default = "default_apps")]
     pub clipboard: PermissionLevel,
+    /// Deleting files (to the Recycle Bin). Every deletion still asks.
+    #[serde(default = "default_apps")]
+    pub delete: PermissionLevel,
 }
 
 fn default_apps() -> PermissionLevel {
@@ -94,7 +97,7 @@ fn default_browser() -> PermissionLevel {
 
 impl Default for ToolPermissions {
     fn default() -> Self {
-        Self { read: PermissionLevel::Allow, write: PermissionLevel::Ask, browser: PermissionLevel::Ask, apps: PermissionLevel::Deny, system: PermissionLevel::Ask, m365: PermissionLevel::Ask, google: PermissionLevel::Ask, input: PermissionLevel::Deny, clipboard: PermissionLevel::Deny }
+        Self { read: PermissionLevel::Allow, write: PermissionLevel::Ask, browser: PermissionLevel::Ask, apps: PermissionLevel::Deny, system: PermissionLevel::Ask, m365: PermissionLevel::Ask, google: PermissionLevel::Ask, input: PermissionLevel::Deny, clipboard: PermissionLevel::Deny, delete: PermissionLevel::Deny }
     }
 }
 

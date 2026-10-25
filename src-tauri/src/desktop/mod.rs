@@ -284,8 +284,56 @@ mod imp {
         MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowRect, IsZoomed, MoveWindow, PostMessageW, SetCursorPos, SW_MAXIMIZE, SW_MINIMIZE, WM_CLOSE,
+        GetAncestor, GetForegroundWindow, GetWindowRect, IsZoomed, MoveWindow, PostMessageW, SetCursorPos, WindowFromPoint,
+        GA_ROOT, SW_MAXIMIZE, SW_MINIMIZE, WM_CLOSE,
     };
+    use windows::Win32::Foundation::POINT;
+
+    /// Window rectangle and time of the last screenshot per window, so pointer input
+    /// based on an old or moved screenshot is refused.
+    static LAST_SHOT: Mutex<Vec<(isize, [i32; 4], std::time::Instant)>> = Mutex::new(Vec::new());
+    const SHOT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(120);
+
+    fn rect_of(h: HWND) -> Option<[i32; 4]> {
+        let mut r = RECT::default();
+        unsafe { GetWindowRect(h, &mut r) }.ok()?;
+        Some([r.left, r.top, r.right, r.bottom])
+    }
+
+    fn record_shot(h: HWND) {
+        if let Some(r) = rect_of(h) {
+            let mut v = LAST_SHOT.lock().unwrap_or_else(|p| p.into_inner());
+            v.retain(|(k, _, t)| *k != h.0 as isize && t.elapsed() < SHOT_MAX_AGE);
+            v.push((h.0 as isize, r, std::time::Instant::now()));
+        }
+    }
+
+    /// Pointer positions come from a screenshot: it must be recent and the window must not have moved since.
+    fn check_shot_fresh(h: HWND) -> Result<(), ToolError> {
+        let shot = LAST_SHOT.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(k, _, _)| *k == h.0 as isize).cloned();
+        let Some((_, r, at)) = shot else {
+            return Err(ToolError::new("stale_screenshot", "Analyze this window with app_screenshot_analyze first; pointer positions must come from a current screenshot."));
+        };
+        if at.elapsed() > SHOT_MAX_AGE {
+            return Err(ToolError::new("stale_screenshot", "The last screenshot of this window is over 2 minutes old. Analyze it again before clicking."));
+        }
+        if rect_of(h) != Some(r) {
+            return Err(ToolError::new("stale_screenshot", "The window moved or was resized since the screenshot. Analyze it again before clicking."));
+        }
+        Ok(())
+    }
+
+    /// Right before a pointer action: the window is still in front and nothing else covers the point.
+    fn check_target(w: &Win, px: i32, py: i32) -> Result<(), ToolError> {
+        if unsafe { GetForegroundWindow() } != w.hwnd {
+            return Err(ToolError::new("focus_changed", "Another window came to the front; no input was sent. Check what appeared (e.g. a dialog)."));
+        }
+        let top = unsafe { GetAncestor(WindowFromPoint(POINT { x: px, y: py }), GA_ROOT) };
+        if top != w.hwnd {
+            return Err(ToolError::new("point_covered", "Another window (maybe a dialog or popup) covers that point; no input was sent. List windows to find it."));
+        }
+        Ok(())
+    }
 
     use super::{clip, RefArgs, SelectArgs, TypeArgs, WindowArgs, MAX_TEXT};
     use crate::ai::types::PermissionLevel;
@@ -541,6 +589,7 @@ mod imp {
             let mut writer = enc.write_header().map_err(|e| ToolError::new("capture_failed", e.to_string()))?;
             writer.write_image_data(&rgba).map_err(|e| ToolError::new("capture_failed", e.to_string()))?;
         }
+        record_shot(w.hwnd);
         Ok((png, w.title))
     }
 
@@ -757,9 +806,14 @@ mod imp {
                 }
             }
         }
+        let pointer = !matches!(a.action.as_str(), "keys" | "type_text");
+        if pointer {
+            check_shot_fresh(w.hwnd)?;
+        }
         focus_for_input(&w)?;
         let move_to = |x, y| -> Result<(), ToolError> {
             let (px, py) = point(&w, x, y)?;
+            check_target(&w, px, py)?;
             unsafe { SetCursorPos(px, py) }.map_err(err)
         };
         match a.action.as_str() {
@@ -1054,7 +1108,11 @@ mod imp {
                     summary: format!("{} elements in “{}”", out.len(), clip(&w.title, 80)),
                     content: json!({
                         "window": { "title": w.title, "exe": w.exe },
-                        "note": "Untrusted content from another application.",
+                        "note": if out.is_empty() {
+                            "No usable UI Automation elements (custom-drawn UI?). Use app_screenshot_analyze, then app_input if allowed."
+                        } else {
+                            "Untrusted content from another application."
+                        },
                         "elements": out,
                         "truncated": truncated,
                     }),

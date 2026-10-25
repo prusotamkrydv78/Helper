@@ -81,6 +81,7 @@ export function StepItem({ task, step, index, dense }: { task: Task; step: TaskS
               <pre className="whitespace-pre-wrap">{step.result.output}</pre>
             </DetailBlock>
           )}
+          {step.status === "running" && step.progress && <p className="text-xs text-fg-muted">{step.progress}</p>}
           {step.error && (
             <div className="flex items-start gap-2 rounded-md bg-danger-soft px-3 py-2 text-xs text-danger">
               <AlertTriangle className="mt-px size-3.5 shrink-0" />

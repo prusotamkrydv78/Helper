@@ -45,7 +45,7 @@ const SECTIONS = [
 ] as const;
 
 /** Permission rows the backend actually enforces today. */
-const ENFORCED_TOOLS = new Set(["fs.read", "fs.write", "browser", "apps", "system", "m365", "google", "input", "clipboard"]);
+const ENFORCED_TOOLS = new Set(["fs.read", "fs.write", "browser", "apps", "system", "m365", "google", "input", "clipboard", "fs.delete"]);
 
 function UiOnly({ children = "UI only" }: { children?: ReactNode }) {
   return (

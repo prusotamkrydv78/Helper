@@ -75,6 +75,8 @@ export interface TaskStep {
   result?: ToolResult;
   error?: string;
   requiresApproval: boolean;
+  /** Live progress of a long-running tool (e.g. "Copying file 12 of 40…"). */
+  progress?: string;
   /** Why approval is needed (e.g. "Submits a form to …"), from the backend. */
   approvalReason?: string;
   risk: RiskLevel;

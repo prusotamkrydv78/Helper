@@ -278,6 +278,15 @@ sanitized (no line breaks in addresses or subjects) so content can't inject extr
 | `search_files` | Find files by name (`*` wildcards) in allowed folders | Read files |
 | `find_duplicates` | Identical-content groups (SHA-256) and reclaimable space; read-only | Read files |
 | `move_files` | Batch move/rename (max 100) inside allowed folders; the approval lists every move; each result is checked on disk; never overwrites unless asked | per *Create & modify files*; **always** when overwriting |
+| `copy_files` | Batch copy (max 100 files) inside allowed folders; `on_conflict` skip / rename (`name (2).ext`) / overwrite; each copy verified by size + SHA-256 | per *Create & modify files*; **always** when replacing files |
+| `delete_files` | Move files (and, with `include_folders`, folders up to 2,000 files) inside allowed folders to the **Recycle Bin**; the approval lists every target; permitted folders themselves are protected; results checked on disk | **always**; needs *Delete files* (default Deny) |
+| `rename_files` | Rename files in a folder by template (`{name} {ext} {n} {n:3} {date} {year} {month}`) and/or find/replace; every new name is previewed; never overwrites | per *Create & modify files* |
+| `organize_files` | Move a folder's files into subfolders by extension, year or month (created as needed); previewed | per *Create & modify files* |
+| `system_audio_devices` | Speakers/headphones and microphones, with the defaults marked (changing the default device has no public API → Settings) | per System permission |
+| `system_set_microphone` | Mute/unmute the default microphone; read back | **always** |
+| `system_wifi_status` / `system_wifi` | Current and visible networks (Native Wifi API); connect to a network with a **saved profile**, or disconnect (warns that the assistant may go offline); verified | status per System; connect/disconnect **always** |
+| `system_power` | sleep, restart, shutdown (scheduled 60 s ahead with a Windows warning, cancellable via `cancel_shutdown` or `shutdown /a`) | **always**, with warnings |
+| `system_lock` | Lock the session (`LockWorkStation`) | **always** |
 | `system_set_volume` | Default speaker volume / mute (Core Audio); the new state is read back | **always** |
 | `system_open_settings` | Opens an allow-listed Windows Settings page (`ms-settings:` URIs) | per System permission |
 | `clipboard_read` / `clipboard_write` | Clipboard text; writing is read back to confirm | read **always**; write per *Clipboard* permission (default Deny) |
@@ -288,6 +297,22 @@ sanitized (no line breaks in addresses or subjects) so content can't inject extr
 the other desktop tools); typing and key presses are refused when the focused field is a password field;
 Windows-key shortcuts and Ctrl+Alt+Del are refused. Input effects can't be verified generically, so the tool
 says so and the agent is told to re-read the window. No file deletion tool exists.
+
+**Long file operations** (search, duplicates, move, copy, delete, rename, organize) run up to 30 minutes,
+show live progress on the task card, and stop between items when you press Stop: the result lists what was
+completed and verified (also recorded in the activity log as `cancelled`); nothing else is touched.
+`copy_files` copies folders recursively (structure, empty folders, max 20,000 files) and verifies every file by
+SHA-256; `move_files` moves across drives by copy → verify → delete source. `search_files` also filters by
+extension, date (UTC), size and text inside files (text files ≤ 2 MB, returns line + snippet).
+
+**Visual automation checks:** pointer input (click/scroll/drag) needs a screenshot of that window taken
+in the last 2 minutes while the window had its current position and size (`stale_screenshot` otherwise);
+right before each pointer action the window must still be in front (`focus_changed`) and must be the window
+under the point (`point_covered`, e.g. a dialog popped up). Windows without usable UI Automation elements say
+so and point to screenshot analysis.
+
+**Settings:** `system_open_settings` returns `direct_control`, saying what can be changed directly (volume,
+mute, lock) and why other toggles (brightness, Night light, Focus, radios) must be changed on the page.
 
 **OS limits:** laptop screen brightness needs WMI (not supported here; `system_open_settings` → `display`
 instead); moving files across drives isn't supported (rename only); Windows ignores synthetic input sent to

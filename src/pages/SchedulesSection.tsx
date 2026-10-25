@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { CalendarClock, Pause, Pencil, Play, Trash2, Info } from "lucide-react";
-import type { ID, Schedule, ScheduleKind } from "../types";
+import type { ID, Schedule, WorkflowScheduleKind } from "../types";
 import { Button } from "../components/ui/Button";
 import { Badge, Field, Input, Segmented, Select } from "../components/ui/primitives";
-import { useToast } from "../components/ui/overlays";
+import { ConfirmDialog, useToast } from "../components/ui/overlays";
 import { useWorkflows } from "../store/WorkflowStore";
 import { localTimeZone, MIN_INTERVAL_MINUTES, useSchedules, type ScheduleInput } from "../store/ScheduleStore";
 import { cn } from "../lib/utils";
@@ -41,6 +41,7 @@ export function SchedulesSection() {
   const templates = workflows.filter((w) => !w.scheduleId);
   const [form, setForm] = useState<ScheduleInput | null>(null);
   const [editing, setEditing] = useState<ID | null>(null);
+  const [deleting, setDeleting] = useState<ID | null>(null);
   const tz = localTimeZone();
 
   const guard = (fn: () => void) => {
@@ -98,7 +99,7 @@ export function SchedulesSection() {
           </Field>
           <Field label="Repeat" inline>
             {() => (
-              <Segmented<ScheduleKind>
+              <Segmented<WorkflowScheduleKind>
                 label="Repeat"
                 value={form.kind}
                 onChange={(kind) => set({ kind })}
@@ -220,7 +221,7 @@ export function SchedulesSection() {
                   >
                     Edit
                   </Button>
-                  <Button size="sm" variant="danger-ghost" icon={<Trash2 className="size-3.5" />} onClick={() => remove(s.id)}>
+                  <Button size="sm" variant="danger-ghost" icon={<Trash2 className="size-3.5" />} onClick={() => setDeleting(s.id)}>
                     Delete
                   </Button>
                 </div>
@@ -229,6 +230,14 @@ export function SchedulesSection() {
           );
         })}
       </div>
+      <ConfirmDialog
+        open={deleting !== null}
+        onClose={() => setDeleting(null)}
+        onConfirm={() => deleting && remove(deleting)}
+        title="Delete this schedule?"
+        description="It won't run again. The workflow itself and past runs are kept."
+        confirmLabel="Delete"
+      />
     </section>
   );
 }

@@ -66,6 +66,22 @@ pub struct ToolPermissions {
     /// Desktop app tools. Launching, clicking and typing always ask.
     #[serde(default = "default_apps")]
     pub apps: PermissionLevel,
+    /// System status (read) and system actions (always ask).
+    #[serde(default = "default_browser")]
+    pub system: PermissionLevel,
+    /// Microsoft 365 mail/calendar. Reads follow the level; drafts ask per level;
+    /// sending mail and creating events always ask.
+    #[serde(default = "default_browser")]
+    pub m365: PermissionLevel,
+    /// Google Workspace, same rules as `m365`.
+    #[serde(default = "default_browser")]
+    pub google: PermissionLevel,
+    /// Real mouse/keyboard input into app windows (always asks per action).
+    #[serde(default = "default_apps")]
+    pub input: PermissionLevel,
+    /// Clipboard text (reading always asks).
+    #[serde(default = "default_apps")]
+    pub clipboard: PermissionLevel,
 }
 
 fn default_apps() -> PermissionLevel {
@@ -78,7 +94,7 @@ fn default_browser() -> PermissionLevel {
 
 impl Default for ToolPermissions {
     fn default() -> Self {
-        Self { read: PermissionLevel::Allow, write: PermissionLevel::Ask, browser: PermissionLevel::Ask, apps: PermissionLevel::Deny }
+        Self { read: PermissionLevel::Allow, write: PermissionLevel::Ask, browser: PermissionLevel::Ask, apps: PermissionLevel::Deny, system: PermissionLevel::Ask, m365: PermissionLevel::Ask, google: PermissionLevel::Ask, input: PermissionLevel::Deny, clipboard: PermissionLevel::Deny }
     }
 }
 

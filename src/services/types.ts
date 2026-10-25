@@ -21,7 +21,7 @@ export interface ChatRequest {
   messages: Pick<Message, "role" | "content">[];
   settings: Pick<Settings, "model" | "systemPrompt" | "maxStepsPerTask" | "allowedApps">;
   /** File tool permissions, enforced by the backend. */
-  permissions: { read: PermissionLevel; write: PermissionLevel; browser: PermissionLevel; apps: PermissionLevel };
+  permissions: { read: PermissionLevel; write: PermissionLevel; browser: PermissionLevel; apps: PermissionLevel; system: PermissionLevel; m365: PermissionLevel; google: PermissionLevel; input: PermissionLevel; clipboard: PermissionLevel };
 }
 
 export interface ToolFileChange {

@@ -119,6 +119,26 @@ prompt-injection page, whose planted instructions were ignored. Downloads, the a
 blocking and redirects are covered by the automated tests against local pages. A live
 download from a public site hasn't been tested.
 
+## Command Center
+
+The **Command Center** page (first in the sidebar) shows live state only: pending approvals (approve or
+decline in place), the running workflow's progress, workflows needing attention, the next scheduled runs,
+Microsoft 365 / Google connection status with connect/reconnect, a system snapshot (`system_status_now`,
+read-only, refreshed on demand) and recent tool activity (activity log, polled every 10 s).
+Quick actions (open an app, search email, today's calendar, unread mail, diagnose the system) start a normal
+chat, so tools run under your permissions and approvals; *Start* runs a draft or paused workflow directly.
+
+## Managing data
+
+Settings → **Data on this device** deletes each kind of data separately, each after a confirmation: chats &
+tasks (a workflow whose conversation was deleted continues its next step in a new one), workflows with their
+conversations (refused while one is running), schedules, memory, the activity log, and the Microsoft 365 /
+Google connections (tokens deleted; Google access is also revoked). Settings and permissions are kept.
+
+The old demo *Automations* page and *Local PC agent* status were removed from the UI: workflows + schedules
+and the Rust backend replace them. The *Sandbox mode* switch was removed because file tools are always
+confined to allowed folders.
+
 ## Workflows
 
 The **Workflows** page turns a goal into ordered steps (planned by the model without tools, or typed
@@ -149,6 +169,131 @@ an earlier (possibly interrupted) run are never repeated.
 - **Time zones:** times are local wall-clock times on this computer (DST-aware). The zone a schedule was
   created in is shown if the computer's zone has changed since.
 - Unattended steps that need approval wait in the run's conversation until you answer.
+
+## Memory, activity log, system tools and background mode
+
+- **Memory** (`memory.json`): short notes (preferences, project context, ongoing tasks). Add, inspect and
+  delete them in Settings → Memory. The assistant can propose `memory_save` / `memory_forget`, which always
+  need your approval. Notes are sent to the AI provider as context; don't store secrets.
+- **Activity log** (`audit.log`, rotated at 5 MB): every tool call that completed, failed or was declined,
+  with shortened arguments (file contents and typed text are replaced by their length). Settings → Activity log.
+- **System tools** (“System info & actions” permission, default Ask): `system_status` (CPU, memory, fixed
+  drives, internet route + local IP, top processes by memory) and `system_end_process` (always asks; Windows
+  system processes, administrator processes and this app are refused).
+- **Screenshot analysis**: `app_screenshot_analyze` captures one window (same window rules as the other desktop
+  tools), downscales it to 1600 px wide and sends it to the configured model with your question. Always asks
+  first; images aren't stored. Needs a vision-capable model (e.g. `gpt-4o-mini`). Results can be wrong, so the
+  agent is told to confirm with `app_get_ui_tree` before acting.
+- **Background** (Settings → Background & notifications): tray icon (Show/Quit), optional close-to-tray so
+  schedules keep running, *Start with Windows* (starts hidden, via `tauri-plugin-autostart`), and desktop
+  notifications (`tauri-plugin-notification`) for approvals and finished workflows while the app isn't focused.
+  Windows may suppress notifications (Focus Assist / notification settings).
+- **Agent behaviour:** the system prompt asks the model to plan, verify each outcome, try one alternative on
+  failure, and ask you a specific question when blocked.
+
+**Not implemented:** notes and messaging integrations.
+
+## Microsoft 365 (Outlook mail and calendar)
+
+Tools (permission “Microsoft 365 mail & calendar”, default Ask; offered only while connected):
+
+| Tool | What it does | Approval |
+| --- | --- | --- |
+| `mail_search` | List/search messages (id, subject, sender, time, preview) | per permission |
+| `mail_read` | Read one message as plain text (max 20,000 characters) | per permission |
+| `mail_create_draft` | Create a draft or reply draft — never sends | per permission |
+| `mail_send_draft` | Send a draft | **always**, showing the draft's real recipients and subject |
+| `calendar_list` | Events between two UTC times (max 50) | per permission |
+| `calendar_availability` | Busy times for you and optional attendees (30-min slots) | per permission |
+| `calendar_create_event` | Create an event; attendees get invitations | **always** |
+
+Summaries are done by the model from `mail_read` results. Mail and calendar content is labeled untrusted.
+
+### What you must configure (one time)
+
+1. Sign in to <https://entra.microsoft.com> → **Identity → Applications → App registrations → New registration**.
+   - Name: e.g. *AI Automation*.
+   - Supported account types: *Accounts in any organizational directory and personal Microsoft accounts*
+     (or only your organization — then put your tenant ID/domain in Settings).
+   - Redirect URI: platform **Public client/native (mobile & desktop)**, URI `http://localhost`.
+     (Microsoft accepts any port on `localhost` for this platform; the app picks a free one each sign-in.)
+2. In the app's **Authentication** page, set **Allow public client flows** to *Yes*. No client secret is used.
+3. **API permissions → Add → Microsoft Graph → Delegated**: `User.Read`, `Mail.ReadWrite`, `Mail.Send`,
+   `Calendars.ReadWrite`, `offline_access`. Some organizations require an admin to grant consent.
+4. Copy the **Application (client) ID** into Settings → Microsoft 365 (or set `MS_GRAPH_CLIENT_ID`), click
+   **Save**, then **Connect Microsoft account** and finish sign-in in the browser.
+
+**How it works:** OAuth 2.0 authorization code with PKCE and a one-shot loopback redirect
+(`http://localhost:<random port>`, state checked). The refresh token is stored in Windows Credential Manager
+(entries `com.helper.app` / `ms-graph-refresh-*`); access tokens stay in memory and are refreshed
+automatically. If Microsoft rejects the refresh token (expired or revoked), the account is disconnected and
+you're asked to connect again. **Disconnect** deletes the stored tokens. Tokens never reach the model, the UI
+or the logs. Graph throttling (429/503) is retried once.
+
+**Limits:** times for reading are UTC (the model converts); no attachments; plain-text bodies only; one account.
+
+## Google Workspace (Gmail and Google Calendar)
+
+Tools (permission “Google Gmail & Calendar”, default Ask; offered only while connected):
+
+| Tool | What it does | Approval |
+| --- | --- | --- |
+| `gmail_search` | Search with Gmail syntax (`from:`, `is:unread`, `newer_than:7d`…) | per permission |
+| `gmail_read` | Read one message as plain text (HTML is converted; max 20,000 characters) | per permission |
+| `gmail_create_draft` | Create a draft, or a reply draft in the original thread — never sends | per permission |
+| `gmail_send_draft` | Send a draft | **always**, showing the draft's real recipients and subject |
+| `gcal_list` | Primary-calendar events between two UTC times (max 50) | per permission |
+| `gcal_availability` | Free/busy for you and optional attendees | per permission |
+| `gcal_create_event` | Create an event; attendees are emailed invitations | **always** |
+
+### What you must configure (one time)
+
+1. In <https://console.cloud.google.com> create (or pick) a project.
+2. **APIs & Services → Library**: enable **Gmail API** and **Google Calendar API**.
+3. **APIs & Services → OAuth consent screen** (Google Auth Platform): user type *External* (or *Internal* for a
+   Workspace org), app name and support email. Under **Data access / Scopes** add
+   `gmail.readonly`, `gmail.compose`, `calendar.events`, `calendar.freebusy`, plus `openid` and `email`.
+   While the app is in **Testing**, add your Google account under **Test users**.
+   Note: Gmail scopes are *restricted*; a Testing-mode app works for its test users, but Google expires its
+   refresh tokens after **7 days** (you'll be asked to connect again). Publishing for other users requires
+   Google's verification.
+4. **APIs & Services → Credentials → Create credentials → OAuth client ID**, application type **Desktop app**.
+   Copy the client ID and client secret into Settings → Google Workspace, click **Save**, then
+   **Connect Google account**. (Desktop clients accept any loopback port; the app uses `http://127.0.0.1:<port>`.)
+
+**How it works:** same as Microsoft 365: authorization code + PKCE, state check, one-shot loopback redirect.
+All requested scopes must be granted or the connection is refused. The refresh token and the client secret are
+stored in Windows Credential Manager (`com.helper.app` / `google-refresh-*`, `google-client-secret-*`); access
+tokens stay in memory. **Disconnect** revokes the grant at Google and deletes local tokens. Draft headers are
+sanitized (no line breaks in addresses or subjects) so content can't inject extra recipients.
+
+**Limits:** primary calendar only; no attachments; one account; Testing-mode tokens expire weekly.
+
+## Laptop control
+
+| Tool | What it does | Approval |
+| --- | --- | --- |
+| `app_window` | minimize / maximize / restore / left_half / right_half / move_resize / close (WM_CLOSE, the app may ask to save); the resulting state is checked | close always; others when Desktop apps = Ask |
+| `app_input` | Fallback input: click, double/right click, scroll, drag, key combos, typing. Positions are fractions of the window (as reported by `app_screenshot_analyze`). The window is brought to the front and must *be* the foreground window before anything is sent | **always**; needs the *Mouse & keyboard input* permission (default Deny) and Desktop apps |
+| `search_files` | Find files by name (`*` wildcards) in allowed folders | Read files |
+| `find_duplicates` | Identical-content groups (SHA-256) and reclaimable space; read-only | Read files |
+| `move_files` | Batch move/rename (max 100) inside allowed folders; the approval lists every move; each result is checked on disk; never overwrites unless asked | per *Create & modify files*; **always** when overwriting |
+| `system_set_volume` | Default speaker volume / mute (Core Audio); the new state is read back | **always** |
+| `system_open_settings` | Opens an allow-listed Windows Settings page (`ms-settings:` URIs) | per System permission |
+| `clipboard_read` / `clipboard_write` | Clipboard text; writing is read back to confirm | read **always**; write per *Clipboard* permission (default Deny) |
+
+`system_status` now also reports battery (charge, AC, time left) and volume/mute.
+
+**Safety:** input is refused for this app, elevated windows, UAC/sign-in prompts and hung windows (same rules as
+the other desktop tools); typing and key presses are refused when the focused field is a password field;
+Windows-key shortcuts and Ctrl+Alt+Del are refused. Input effects can't be verified generically, so the tool
+says so and the agent is told to re-read the window. No file deletion tool exists.
+
+**OS limits:** laptop screen brightness needs WMI (not supported here; `system_open_settings` → `display`
+instead); moving files across drives isn't supported (rename only); Windows ignores synthetic input sent to
+elevated windows (UIPI) and to the secure desktop; some apps (games, DRM video) don't respond to synthetic
+input or can't be captured. Coordinates assume the app is DPI-aware (Tauri is), so window rectangles and
+input positions use the same physical pixels.
 
 ## Desktop app tools (Windows)
 

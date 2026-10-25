@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  LayoutDashboard,
   ListOrdered,
   History,
   ListChecks,
@@ -14,7 +15,6 @@ import {
   Search,
   Settings,
   Trash2,
-  Workflow,
   X,
   Zap,
 } from "lucide-react";
@@ -27,10 +27,10 @@ import { ConfirmDialog, Menu, Tooltip } from "../ui/overlays";
 import { Kbd, Skeleton } from "../ui/primitives";
 
 const NAV: { view: View; label: string; icon: typeof MessageSquare }[] = [
+  { view: "home", label: "Command Center", icon: LayoutDashboard },
   { view: "chat", label: "Chats", icon: MessageSquare },
   { view: "tasks", label: "Tasks", icon: ListChecks },
   { view: "workflows", label: "Workflows", icon: ListOrdered },
-  { view: "automations", label: "Automations", icon: Workflow },
   { view: "history", label: "History", icon: History },
 ];
 

@@ -3,6 +3,7 @@ import type { ID, Workflow, WorkflowStep } from "../types";
 import { nowISO, uid } from "../lib/utils";
 import { workflowService } from "../services/tauri/workflows";
 import { useStore, type TurnResult } from "./AppStore";
+import { notifyIfAway } from "../services/tauri/assistant";
 
 /**
  * Workflow engine. Steps run one at a time, each as a normal chat turn in the
@@ -25,9 +26,12 @@ export interface WorkflowActions {
   /** Re-queues a failed, interrupted or cancelled step and resumes. */
   retryStep(id: ID, stepId: ID): void;
   skipStep(id: ID, stepId: ID): void;
+  /** Deletes a workflow and its conversation. */
   remove(id: ID): void;
   /** True while a workflow step is executing (only one workflow runs at a time). */
   isBusy(): boolean;
+  /** Deletes all workflows and runs. Refused while one is executing. */
+  clearAll(): Promise<void>;
   /** Starts a fresh copy of a workflow's steps (used by schedules). Returns the new workflow id. */
   runCopy(sourceId: ID, label: string, scheduleId: ID): ID;
 }
@@ -112,7 +116,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const running = useRef<ID | null>(null);
   const saving = useRef<Promise<void>>(Promise.resolve());
   const appRef = useRef(app);
+  const convIds = useRef(new Set<ID>());
+  convIds.current = new Set(state.conversations.map((c) => c.id));
   appRef.current = app;
+  const notifyRef = useRef(state.settings.notifications);
+  notifyRef.current = state.settings.notifications;
   const modelRef = useRef(state.settings.model);
   modelRef.current = state.settings.model;
 
@@ -167,7 +175,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const runLoop = useCallback(
     async (id: ID) => {
       // One workflow at a time: tools such as the browser session are shared.
-      if (running.current) return;
+      if (running.current) {
+        if (running.current !== id && ref.current.find((x) => x.id === id)?.status === "running")
+          await patch(id, { status: "paused" }).catch(() => {});
+        return;
+      }
       running.current = id;
       setActiveId(id);
       try {
@@ -182,6 +194,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           if (index < 0) {
             const failed = w.steps.some((s) => s.status === "failed" || s.status === "interrupted");
             await patch(id, { status: failed ? "failed" : "completed" });
+            notifyIfAway(notifyRef.current, `Workflow ${failed ? "finished with failures" : "completed"}`, w.title);
             return;
           }
           const step = w.steps[index];
@@ -192,9 +205,16 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
             await patch(id, { status: "paused" }).catch(() => {});
             return;
           }
+          // The conversation may have been deleted (e.g. "Delete chats"); continue in a new one.
+          let conversationId = w.conversationId;
+          if (!convIds.current.has(conversationId)) {
+            conversationId = appRef.current.createWorkflowConversation(`Workflow: ${w.title}`);
+            convIds.current.add(conversationId);
+            await patch(id, { conversationId });
+          }
           let result: TurnResult;
           try {
-            result = await appRef.current.runTurn(w.conversationId, stepPrompt(w, index));
+            result = await appRef.current.runTurn(conversationId, stepPrompt(w, index));
           } catch (e) {
             result = { status: "error", content: "", error: errorText(e), live: true };
           }
@@ -213,6 +233,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           await patchStep(id, step.id, { ...o, finishedAt: nowISO() });
           if (o.status === "failed") {
             await patch(id, { status: "failed", pauseRequested: false });
+            notifyIfAway(notifyRef.current, "Workflow step failed", `${w.title}: ${o.error ?? "step failed"}`);
             return;
           }
         }
@@ -278,6 +299,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           .catch(() => {});
       },
       isBusy: () => running.current !== null,
+      clearAll: async () => {
+        if (running.current) throw new Error("A workflow is running. Cancel it first.");
+        const convs = ref.current.map((w) => w.conversationId);
+        await commit(() => []);
+        convs.forEach((c) => convIds.current.has(c) && appRef.current.deleteConversation(c));
+      },
       runCopy: (sourceId, label, scheduleId) => {
         const src = ref.current.find((w) => w.id === sourceId);
         if (!src) throw new Error("The scheduled workflow no longer exists.");
@@ -299,7 +326,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       },
       remove: (id) => {
         if (running.current === id) throw new Error("Cancel the workflow before deleting it.");
-        void commit((list) => list.filter((w) => w.id !== id)).catch(() => {});
+        const conv = ref.current.find((w) => w.id === id)?.conversationId;
+        void commit((list) => list.filter((w) => w.id !== id)).then(
+          () => conv && convIds.current.has(conv) && appRef.current.deleteConversation(conv),
+          () => {},
+        );
       },
     }),
     [commit, patch, patchStep, runLoop],

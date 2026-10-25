@@ -77,6 +77,7 @@ interface ScheduleValue {
   update(id: ID, input: ScheduleInput): void;
   setEnabled(id: ID, enabled: boolean): void;
   remove(id: ID): void;
+  clearAll(): Promise<void>;
 }
 
 const Ctx = createContext<ScheduleValue | null>(null);
@@ -224,6 +225,7 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
         void patch(id, { enabled, nextRunAt: next ? next.toISOString() : s.nextRunAt }).catch(() => {});
       },
       remove: (id) => void commit((list) => list.filter((s) => s.id !== id)).catch(() => {}),
+      clearAll: () => commit(() => []),
     }),
     [schedules, loaded, error, commit, patch],
   );

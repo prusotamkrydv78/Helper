@@ -3,6 +3,7 @@
 
 pub mod allowed_dirs;
 pub mod fs;
+pub mod fs_ops;
 pub mod paths;
 
 use std::borrow::Cow;
@@ -27,6 +28,16 @@ pub enum ToolKind {
     Browser,
     /// Inspects or controls desktop app windows (Windows UI Automation).
     Desktop,
+    /// Long-term memory notes (saving and forgetting always ask).
+    Memory,
+    /// System status and approved system actions.
+    System,
+    /// Microsoft Graph: Outlook mail and calendar.
+    Graph,
+    /// Google Workspace: Gmail and Google Calendar.
+    Google,
+    /// Clipboard text.
+    Clipboard,
 }
 
 pub struct ToolSpec {
@@ -273,6 +284,348 @@ pub const TOOLS: &[ToolSpec] = &[
             "additionalProperties": false
         }),
     },
+    ToolSpec {
+        name: "app_screenshot_analyze",
+        title: "Analyze screenshot",
+        description: "Take a screenshot of a window and have the vision model describe it (layout, controls, visible text), optionally answering a question. Use it when app_get_ui_tree isn't enough, e.g. custom-drawn UIs. The image is sent to the AI provider; needs the user's approval.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": {
+                "window": { "type": "integer", "description": "Window handle from app_list_windows." },
+                "question": { "type": "string", "description": "What to look for (optional)." }
+            },
+            "required": ["window"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "memory_save",
+        title: "Remember",
+        description: "Save a short long-term note (user preference, project context, ongoing task) for future conversations. Only for things the user would want remembered; never secrets or passwords. Needs the user's approval.",
+        kind: ToolKind::Memory,
+        parameters: || json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "description": "The note, at most 500 characters." },
+                "category": { "type": "string", "enum": ["preference", "project", "task", "other"] }
+            },
+            "required": ["text", "category"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "memory_forget",
+        title: "Forget",
+        description: "Delete a long-term note by its id (shown in the memory list in your instructions). Needs the user's approval.",
+        kind: ToolKind::Memory,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" } },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "system_status",
+        title: "System status",
+        description: "Read CPU load, memory, fixed drives' free space, internet route and the top processes by memory (with pids).",
+        kind: ToolKind::System,
+        parameters: || json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "system_end_process",
+        title: "End process",
+        description: "End (force-quit) an ordinary user process by pid from system_status. Windows system processes, administrator processes and this app are refused. Always needs the user's approval.",
+        kind: ToolKind::System,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "pid": { "type": "integer" } },
+            "required": ["pid"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "mail_search",
+        title: "Search mail",
+        description: "Search or list Outlook messages (newest first without a query). Returns id, subject, sender, time, preview.",
+        kind: ToolKind::Graph,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "query": { "type": "string", "description": "Search words (optional)." }, "unread_only": { "type": "boolean" }, "top": { "type": "integer", "description": "1-25, default 10." } },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "mail_read",
+        title: "Read email",
+        description: "Read one Outlook message by id (plain-text body, up to 20,000 characters).",
+        kind: ToolKind::Graph,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" } },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "mail_create_draft",
+        title: "Draft email",
+        description: "Create an Outlook draft (optionally as a reply to a message id). Never sends. Use mail_send_draft to send.",
+        kind: ToolKind::Graph,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "to": { "type": "array", "items": { "type": "string" } }, "cc": { "type": "array", "items": { "type": "string" } }, "subject": { "type": "string" }, "body": { "type": "string", "description": "Plain text." }, "reply_to_id": { "type": "string" } },
+            "required": ["to", "subject", "body"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "mail_send_draft",
+        title: "Send email",
+        description: "Send an existing draft by id. Always asks the user, showing the real recipients and subject.",
+        kind: ToolKind::Graph,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" } },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "calendar_list",
+        title: "Read calendar",
+        description: "List calendar events between two UTC times (max 50).",
+        kind: ToolKind::Graph,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "start": { "type": "string", "description": "ISO date-time in UTC without offset, e.g. 2026-10-25T09:00:00." }, "end": { "type": "string", "description": "ISO date-time in UTC without offset, e.g. 2026-10-25T09:00:00." } },
+            "required": ["start", "end"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "calendar_availability",
+        title: "Check availability",
+        description: "Busy times for the user (and optional attendees) between two UTC times, in 30-minute slots.",
+        kind: ToolKind::Graph,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "start": { "type": "string", "description": "ISO date-time in UTC without offset, e.g. 2026-10-25T09:00:00." }, "end": { "type": "string", "description": "ISO date-time in UTC without offset, e.g. 2026-10-25T09:00:00." }, "attendees": { "type": "array", "items": { "type": "string" } } },
+            "required": ["start", "end"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "calendar_create_event",
+        title: "Create event",
+        description: "Create a calendar event; attendees receive invitations. Always asks the user.",
+        kind: ToolKind::Graph,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "subject": { "type": "string" }, "start": { "type": "string", "description": "Local date-time without offset, e.g. 2026-10-25T09:00:00." }, "end": { "type": "string" }, "time_zone": { "type": "string", "description": "Windows or IANA time zone of start/end, e.g. Europe/Berlin." }, "attendees": { "type": "array", "items": { "type": "string" } }, "location": { "type": "string" }, "body": { "type": "string" } },
+            "required": ["subject", "start", "end", "time_zone"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "gmail_search",
+        title: "Search Gmail",
+        description: "Search Gmail with Gmail search syntax (e.g. from:alice is:unread newer_than:7d), newest first. Returns id, subject, sender, date, snippet.",
+        kind: ToolKind::Google,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" }, "top": { "type": "integer", "description": "1-25, default 10." } },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "gmail_read",
+        title: "Read Gmail message",
+        description: "Read one Gmail message by id (plain text, up to 20,000 characters).",
+        kind: ToolKind::Google,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" } },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "gmail_create_draft",
+        title: "Draft Gmail",
+        description: "Create a Gmail draft (optionally replying in the thread of a message id). Never sends. Use gmail_send_draft to send.",
+        kind: ToolKind::Google,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "to": { "type": "array", "items": { "type": "string" } }, "cc": { "type": "array", "items": { "type": "string" } }, "subject": { "type": "string" }, "body": { "type": "string", "description": "Plain text." }, "reply_to_id": { "type": "string" } },
+            "required": ["to", "subject", "body"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "gmail_send_draft",
+        title: "Send Gmail",
+        description: "Send a Gmail draft by draft id. Always asks the user, showing the real recipients and subject.",
+        kind: ToolKind::Google,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "id": { "type": "string", "description": "Draft id from gmail_create_draft." } },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "gcal_list",
+        title: "Read Google Calendar",
+        description: "List primary Google Calendar events between two UTC times (max 50, recurring events expanded).",
+        kind: ToolKind::Google,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "start": { "type": "string", "description": "ISO date-time in UTC without offset, e.g. 2026-10-25T09:00:00." }, "end": { "type": "string", "description": "ISO date-time in UTC without offset, e.g. 2026-10-25T09:00:00." } },
+            "required": ["start", "end"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "gcal_availability",
+        title: "Google free/busy",
+        description: "Busy times for the user's primary calendar and optional attendees between two UTC times.",
+        kind: ToolKind::Google,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "start": { "type": "string", "description": "ISO date-time in UTC without offset, e.g. 2026-10-25T09:00:00." }, "end": { "type": "string", "description": "ISO date-time in UTC without offset, e.g. 2026-10-25T09:00:00." }, "attendees": { "type": "array", "items": { "type": "string" } } },
+            "required": ["start", "end"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "gcal_create_event",
+        title: "Create Google event",
+        description: "Create a primary Google Calendar event; attendees are emailed invitations. Always asks the user.",
+        kind: ToolKind::Google,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "subject": { "type": "string" }, "start": { "type": "string", "description": "Local date-time without offset, e.g. 2026-10-25T09:00:00." }, "end": { "type": "string" }, "time_zone": { "type": "string", "description": "IANA time zone, e.g. Europe/Berlin." }, "attendees": { "type": "array", "items": { "type": "string" } }, "location": { "type": "string" }, "body": { "type": "string" } },
+            "required": ["subject", "start", "end", "time_zone"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "search_files",
+        title: "Search files",
+        description: "Find files by name in a permitted folder (case-insensitive, * wildcards, e.g. *.pdf). Up to 200 matches with sizes.",
+        kind: ToolKind::Read,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" }, "pattern": { "type": "string" }, "recursive": { "type": "boolean" } },
+            "required": ["path", "pattern"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "find_duplicates",
+        title: "Find duplicates",
+        description: "Find files with identical content in a permitted folder. Read-only; reports groups and reclaimable space.",
+        kind: ToolKind::Read,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" }, "recursive": { "type": "boolean" } },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "move_files",
+        title: "Move/rename files",
+        description: "Move or rename up to 100 files inside permitted folders in one batch. The user sees every move before it runs; each result is checked on disk. Never overwrites unless overwrite is true.",
+        kind: ToolKind::Write,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "moves": { "type": "array", "items": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string", "description": "Full destination path including the file name." } }, "required": ["from", "to"], "additionalProperties": false } }, "overwrite": { "type": "boolean" } },
+            "required": ["moves"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "app_window",
+        title: "Manage window",
+        description: "Minimize, maximize, restore, snap to left_half/right_half, move_resize (pixels) or close (gracefully; the app may ask to save) a window. The result is checked.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "window": { "type": "integer", "description": "Window handle from app_list_windows." }, "action": { "type": "string", "enum": ["minimize", "maximize", "restore", "left_half", "right_half", "move_resize", "close"] }, "x": { "type": "integer" }, "y": { "type": "integer" }, "width": { "type": "integer" }, "height": { "type": "integer" } },
+            "required": ["window", "action"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "app_input",
+        title: "Mouse/keyboard input",
+        description: "Fallback when UI Automation can't do it: click, double_click, right_click, scroll, drag, keys (e.g. ctrl+s) or type_text in a window. Positions are fractions of the window (from app_screenshot_analyze). The window is brought to the front first. Always asks the user; verify the effect afterwards.",
+        kind: ToolKind::Desktop,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "window": { "type": "integer", "description": "Window handle from app_list_windows." }, "action": { "type": "string", "enum": ["click", "double_click", "right_click", "scroll", "drag", "keys", "type_text"] }, "x": { "type": "number", "description": "Fraction 0-1 of the window width/height." }, "y": { "type": "number", "description": "Fraction 0-1 of the window width/height." }, "to_x": { "type": "number", "description": "Fraction 0-1 of the window width/height." }, "to_y": { "type": "number", "description": "Fraction 0-1 of the window width/height." }, "amount": { "type": "integer", "description": "Scroll notches, positive = up." }, "keys": { "type": "string" }, "text": { "type": "string" } },
+            "required": ["window", "action"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "system_set_volume",
+        title: "Set volume",
+        description: "Set the default speaker volume (0-100) and/or mute. Always asks; the new state is read back.",
+        kind: ToolKind::System,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "level": { "type": "integer" }, "mute": { "type": "boolean" } },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "system_open_settings",
+        title: "Open Settings",
+        description: "Open a Windows Settings page: display, night_light, sound, bluetooth, network, wifi, battery, power, notifications, focus, apps, default_apps, startup_apps, storage, windows_update, privacy.",
+        kind: ToolKind::System,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "page": { "type": "string" } },
+            "required": ["page"],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "clipboard_read",
+        title: "Read clipboard",
+        description: "Read the text on the clipboard. Always asks the user.",
+        kind: ToolKind::Clipboard,
+        parameters: || json!({
+            "type": "object",
+            "properties": {  },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+    ToolSpec {
+        name: "clipboard_write",
+        title: "Copy to clipboard",
+        description: "Put text on the clipboard (e.g. to paste into another app). The result is read back to confirm.",
+        kind: ToolKind::Clipboard,
+        parameters: || json!({
+            "type": "object",
+            "properties": { "text": { "type": "string" } },
+            "required": ["text"],
+            "additionalProperties": false
+        }),
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static ToolSpec> {
@@ -350,6 +703,9 @@ pub fn execute(spec: &ToolSpec, args: &Value, guard: &PathGuard) -> Result<ToolO
         "read_file" => fs::read_file(guard, parse(args)?),
         "create_directory" => fs::create_directory(guard, parse(args)?),
         "write_file" => fs::write_file(guard, parse(args)?),
+        "search_files" => fs_ops::search_files(guard, parse(args)?),
+        "find_duplicates" => fs_ops::find_duplicates(guard, parse(args)?),
+        "move_files" => fs_ops::move_files(guard, parse(args)?),
         other => Err(ToolError::invalid(format!("Unknown tool `{other}`."))),
     }
 }

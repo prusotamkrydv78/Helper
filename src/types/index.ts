@@ -144,6 +144,10 @@ export interface Settings {
   sendOnEnter: boolean;
   autoScroll: boolean;
   showTaskPanelAutomatically: boolean;
+  /** Hide to the system tray instead of quitting when the window closes. */
+  keepInTray: boolean;
+  /** Desktop notifications for approvals and finished workflows while the app isn't focused. */
+  notifications: boolean;
   // Appearance
   theme: ThemePref;
   fontSize: FontSize;
@@ -180,7 +184,7 @@ export interface AiStatus {
   keyHint: string | null;
 }
 
-export type View ="chat" | "tasks" | "workflows" | "automations" | "history" | "settings";
+export type View ="home" | "chat" | "tasks" | "workflows" | "automations" | "history" | "settings";
 
 // ---- Workflows (persisted by the Rust backend) -----------------------------
 export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed" | "cancelled";
@@ -198,13 +202,13 @@ export interface WorkflowStep {
   finishedAt?: ISODate;
 }
 
-export type ScheduleKind = "once" | "daily" | "weekly" | "interval";
+export type WorkflowScheduleKind = "once" | "daily" | "weekly" | "interval";
 
 export interface Schedule {
   id: ID;
   /** The workflow used as a template; every run is a fresh copy of its steps. */
   workflowId: ID;
-  kind: ScheduleKind;
+  kind: WorkflowScheduleKind;
   /** Local wall-clock time "HH:MM" (once, daily, weekly). */
   time: string;
   /** "YYYY-MM-DD" (once). */

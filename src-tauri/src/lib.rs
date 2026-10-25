@@ -1,9 +1,16 @@
 mod ai;
+mod audit;
+mod background;
+mod clipboard;
+mod memory;
+mod system;
 mod browser;
 mod commands;
 mod config;
 mod desktop;
 mod error;
+mod google;
+mod graph;
 mod state;
 mod tools;
 mod workflows;
@@ -24,6 +31,11 @@ pub fn run() {
         )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![background::MINIMIZED_ARG]),
+        ))
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             let state = state::AppState::new(&config_dir);
@@ -36,8 +48,10 @@ pub fn run() {
                 }
             });
             app.manage(state);
+            background::setup(app)?;
             Ok(())
         })
+        .on_window_event(background::on_window_event)
         .invoke_handler(tauri::generate_handler![
             commands::chat_stream,
             commands::chat_cancel,
@@ -53,6 +67,27 @@ pub fn run() {
             workflows::schedules_load,
             workflows::schedules_save,
             workflows::workflow_plan,
+            memory::memory_list,
+            memory::memory_add,
+            memory::memory_delete,
+            memory::memory_clear,
+            audit::audit_recent,
+            audit::audit_clear,
+            background::notify,
+            background::set_keep_in_tray,
+            background::autostart_get,
+            background::autostart_set,
+            graph::graph_status,
+            graph::graph_set_config,
+            graph::graph_connect,
+            graph::graph_cancel_connect,
+            graph::graph_disconnect,
+            google::google_status,
+            google::google_set_config,
+            google::google_connect,
+            google::google_cancel_connect,
+            google::google_disconnect,
+            system::system_status_now,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

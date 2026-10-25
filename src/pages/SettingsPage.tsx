@@ -1,7 +1,11 @@
 import { useState, type ReactNode } from "react";
 import {
   Bot,
-  Cpu,
+  BellRing,
+  Brain,
+  Database,
+  Plug,
+  ScrollText,
   Folder,
   FolderPlus,
   Eye,
@@ -10,7 +14,6 @@ import {
   Monitor,
   Moon,
   Palette,
-  RefreshCw,
   RotateCcw,
   Shield,
   SlidersHorizontal,
@@ -18,12 +21,12 @@ import {
   Wrench,
 } from "lucide-react";
 import type { PermissionLevel, Settings } from "../types";
-import { cn, formatRelative } from "../lib/utils";
 import { useStore } from "../store/AppStore";
 import { DEFAULT_PERMISSIONS } from "../store/defaults";
+import { ActivityLogSection, BackgroundSection, DataSection, GoogleSection, MemorySection, MicrosoftSection } from "./AssistantSettings";
 import { toBackendError } from "../services/tauri/tauriAi";
 import { Page, PageHeader } from "../components/layout/Page";
-import { Button, Spinner } from "../components/ui/Button";
+import { Button } from "../components/ui/Button";
 import { ConfirmDialog, Tooltip, useToast } from "../components/ui/overlays";
 import { Badge, Field, Input, Segmented, Switch, Textarea } from "../components/ui/primitives";
 
@@ -33,12 +36,16 @@ const SECTIONS = [
   { id: "model", label: "AI model", icon: Bot },
   { id: "folders", label: "Allowed folders", icon: Folder },
   { id: "permissions", label: "Tool permissions", icon: Wrench },
-  { id: "agent", label: "Local agent", icon: Cpu },
+  { id: "microsoft", label: "Accounts", icon: Plug },
+  { id: "memory", label: "Memory", icon: Brain },
+  { id: "background", label: "Background", icon: BellRing },
+  { id: "activity", label: "Activity log", icon: ScrollText },
   { id: "privacy", label: "Privacy & execution", icon: Shield },
+  { id: "data", label: "Data", icon: Database },
 ] as const;
 
 /** Permission rows the backend actually enforces today. */
-const ENFORCED_TOOLS = new Set(["fs.read", "fs.write", "browser", "apps"]);
+const ENFORCED_TOOLS = new Set(["fs.read", "fs.write", "browser", "apps", "system", "m365", "google", "input", "clipboard"]);
 
 function UiOnly({ children = "UI only" }: { children?: ReactNode }) {
   return (
@@ -48,7 +55,7 @@ function UiOnly({ children = "UI only" }: { children?: ReactNode }) {
   );
 }
 
-function Section({ id, title, description, badge, children }: { id: string; title: string; description?: string; badge?: ReactNode; children: ReactNode }) {
+export function Section({ id, title, description, badge, children }: { id: string; title: string; description?: string; badge?: ReactNode; children: ReactNode }) {
   return (
     <section id={`settings-${id}`} className="scroll-mt-6">
       <div className="mb-2 flex items-center gap-2">
@@ -62,12 +69,11 @@ function Section({ id, title, description, badge, children }: { id: string; titl
 }
 
 export function SettingsPage() {
-  const { state, actions, agent } = useStore();
+  const { state, actions } = useStore();
   const toast = useToast();
   const s = state.settings;
   const set = (patch: Partial<Settings>) => actions.updateSettings(patch);
   const [confirmReset, setConfirmReset] = useState(false);
-  const [confirmClear, setConfirmClear] = useState(false);
 
   const jump = (id: string) =>
     document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: s.reduceMotion ? "auto" : "smooth", block: "start" });
@@ -162,10 +168,22 @@ export function SettingsPage() {
 
           <AllowedFoldersSection />
 
+          <MicrosoftSection />
+
+          <GoogleSection />
+
+          <MemorySection />
+
+          <BackgroundSection />
+
+          <ActivityLogSection />
+
+          <DataSection />
+
           <Section
             id="permissions"
             title="Tool permissions"
-            description="Choose what the assistant may do without asking. File, browser and desktop-app permissions are enforced by the backend; terminal tools aren't built."
+            description="Choose what the assistant may do without asking. Enforced by the backend. Sending email, creating events, ending processes and app clicks/typing always ask regardless."
           >
             {s.permissions.map((p) => (
               <Field
@@ -213,41 +231,6 @@ export function SettingsPage() {
             </Field>
           </Section>
 
-          <Section id="agent" title="Local PC agent" description="The local executor carries out approved actions on this computer.">
-            <div className="flex flex-wrap items-center gap-4 py-4">
-              <span
-                className={cn(
-                  "flex size-9 items-center justify-center rounded-lg border",
-                  agent.state === "connected" ? "border-success/30 bg-success-soft text-success" : "border-border bg-surface-2 text-fg-subtle",
-                )}
-              >
-                {agent.state === "checking" ? <Spinner className="size-4" /> : <Cpu className="size-4" />}
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="flex items-center gap-2 text-sm font-medium">
-                  {agent.state === "checking" && "Checking connection…"}
-                  {agent.state === "connected" && "Connected"}
-                  {agent.state === "disconnected" && "Disconnected"}
-                  {agent.state === "not_installed" && "Not installed"}
-                  {agent.state !== "checking" && (
-                    <span
-                      className={cn("size-1.5 rounded-full", agent.state === "connected" ? "bg-success" : "bg-fg-subtle")}
-                      aria-hidden
-                    />
-                  )}
-                </p>
-                <p className="text-xs text-fg-muted">
-                  {agent.state === "connected" && `Version ${agent.version}`}
-                  {(agent.state === "not_installed" || agent.state === "disconnected") && agent.detail}
-                  {agent.state === "checking" && "Looking for a local executor…"}
-                </p>
-                {"checkedAt" in agent && <p className="mt-0.5 text-[11px] text-fg-subtle">Checked {formatRelative(agent.checkedAt)}</p>}
-              </div>
-              <Button variant="outline" icon={<RefreshCw className="size-3.5" />} loading={agent.state === "checking"} onClick={actions.checkAgent}>
-                Check again
-              </Button>
-            </div>
-          </Section>
 
           <Section id="privacy" title="Privacy & execution">
             <Field label="Save conversation history" description="Keep chats and tasks on this device between sessions." inline>
@@ -257,7 +240,7 @@ export function SettingsPage() {
               label="Require approval for high-risk actions"
               description={
                 <span className="inline-flex items-center gap-1.5">
-                  Deleting files, running commands and controlling apps always ask first. <UiOnly />
+                  High-risk permissions (desktop apps) can't be set to Allow while this is on.
                 </span>
               }
               inline
@@ -278,21 +261,10 @@ export function SettingsPage() {
               )}
             </Field>
             <Field
-              label="Sandbox mode"
-              description={
-                <span className="inline-flex items-center gap-1.5">
-                  Restrict file access to approved folders. <UiOnly />
-                </span>
-              }
-              inline
-            >
-              {() => <Switch checked={s.sandboxMode} onChange={(v) => set({ sandboxMode: v })} label="Sandbox mode" />}
-            </Field>
-            <Field
               label="Max steps per task"
               description={
                 <span className="inline-flex items-center gap-1.5">
-                  Stop a task after this many tool calls. <UiOnly />
+                  Most tool-calling rounds per reply (enforced by the backend, max 50).
                 </span>
               }
               inline
@@ -302,18 +274,11 @@ export function SettingsPage() {
                   id={id}
                   type="number"
                   min={1}
-                  max={100}
+                  max={50}
                   value={s.maxStepsPerTask}
-                  onChange={(e) => set({ maxStepsPerTask: Math.max(1, Math.min(100, Number(e.target.value) || 1)) })}
+                  onChange={(e) => set({ maxStepsPerTask: Math.max(1, Math.min(50, Number(e.target.value) || 1)) })}
                   className="w-20 text-right"
                 />
-              )}
-            </Field>
-            <Field label="Clear conversation history" description="Delete all chats and tasks stored on this device." inline>
-              {() => (
-                <Button variant="danger-ghost" onClick={() => setConfirmClear(true)}>
-                  Clear…
-                </Button>
               )}
             </Field>
           </Section>
@@ -330,17 +295,6 @@ export function SettingsPage() {
         title="Reset settings?"
         description="All preferences return to their defaults. Conversations and automations are kept."
         confirmLabel="Reset"
-      />
-      <ConfirmDialog
-        open={confirmClear}
-        onClose={() => setConfirmClear(false)}
-        onConfirm={() => {
-          actions.clearAllData();
-          toast("Conversation history cleared", "success");
-        }}
-        title="Clear conversation history?"
-        description="This permanently deletes every conversation and task on this device."
-        confirmLabel="Clear history"
       />
     </Page>
   );

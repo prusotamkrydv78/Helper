@@ -7,6 +7,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ai::openai::OpenAiClient;
 use crate::browser::worker::BrowserWorker;
+use crate::audit::AuditLog;
+use crate::google::GoogleClient;
+use crate::graph::GraphClient;
+use crate::memory::MemoryStore;
 use crate::tools::allowed_dirs::AllowedDirs;
 
 pub struct AppState {
@@ -14,6 +18,14 @@ pub struct AppState {
     pub allowed_dirs: AllowedDirs,
     /// Managed browser session (Playwright worker), started on first use.
     pub browser: Arc<BrowserWorker>,
+    pub memory: MemoryStore,
+    pub audit: AuditLog,
+    /// Microsoft Graph (Outlook mail and calendar).
+    pub graph: GraphClient,
+    /// Google Workspace (Gmail and Google Calendar).
+    pub google: GoogleClient,
+    /// Hide to the tray instead of quitting when the window is closed.
+    pub keep_in_tray: std::sync::atomic::AtomicBool,
     /// In-flight chat requests by request id, so they can be cancelled.
     inflight: Mutex<HashMap<String, CancellationToken>>,
     /// Tool calls waiting for the user, keyed by "request_id:call_id".
@@ -30,6 +42,11 @@ impl AppState {
             ai: OpenAiClient::new(),
             allowed_dirs: AllowedDirs::load(config_dir),
             browser: Arc::new(BrowserWorker::new()),
+            memory: MemoryStore::load(config_dir),
+            audit: AuditLog::new(config_dir),
+            graph: GraphClient::load(config_dir),
+            google: GoogleClient::load(config_dir),
+            keep_in_tray: std::sync::atomic::AtomicBool::new(false),
             inflight: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
         }

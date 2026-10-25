@@ -25,7 +25,8 @@ import type {
 } from "../types";
 import { load, remove, save } from "../lib/storage";
 import { nowISO, titleFromPrompt, uid } from "../lib/utils";
-import { DEFAULT_SETTINGS } from "./defaults";
+import { DEFAULT_PERMISSIONS, DEFAULT_SETTINGS } from "./defaults";
+import { notifyIfAway } from "../services/tauri/assistant";
 import { isTaskActive, reducer, type AppState, type UIState } from "./reducer";
 
 // ---------------------------------------------------------------------------
@@ -42,7 +43,10 @@ function loadSettings(): Settings {
   if (hadLegacy) save("settings", stored); // scrub the old key from disk right away
   // Older defaults named Claude models; the backend now uses OpenAI.
   if (typeof stored.model === "string" && stored.model.startsWith("claude-")) stored.model = "";
-  return { ...DEFAULT_SETTINGS, ...(stored as Partial<Settings>) };
+  const merged = { ...DEFAULT_SETTINGS, ...(stored as Partial<Settings>) };
+  // Permissions added in newer versions appear with their defaults.
+  const missing = DEFAULT_PERMISSIONS.filter((d) => !merged.permissions.some((p) => p.tool === d.tool));
+  return missing.length ? { ...merged, permissions: [...merged.permissions, ...missing] } : merged;
 }
 
 const isLive = (ai: AiStatus | null): boolean => Boolean(ai?.available && ai.configured && backend.liveChat);
@@ -114,7 +118,7 @@ function initialState(): AppState {
     settings,
     streaming: {},
     ui: {
-      view: ui.view ?? "chat",
+      view: !ui.view || ui.view === "automations" ? "home" : ui.view,
       activeConversationId: ui.activeConversationId ?? null,
       sidebarCollapsed: ui.sidebarCollapsed ?? false,
       panelOpen: ui.panelOpen ?? false,
@@ -162,6 +166,8 @@ export interface Actions {
   openTask(taskId: ID): void;
 
   newChat(): void;
+  /** Opens a new conversation and sends `text` in it (used by quick actions). */
+  startChat(text: string): void;
   selectConversation(id: ID): void;
   renameConversation(id: ID, title: string): void;
   deleteConversation(id: ID): void;
@@ -398,6 +404,11 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
             write: s.permissions.find((p) => p.tool === "fs.write")?.level ?? "ask",
             browser: s.permissions.find((p) => p.tool === "browser")?.level ?? "ask",
             apps: s.permissions.find((p) => p.tool === "apps")?.level ?? "deny",
+            system: s.permissions.find((p) => p.tool === "system")?.level ?? "ask",
+            m365: s.permissions.find((p) => p.tool === "m365")?.level ?? "ask",
+            google: s.permissions.find((p) => p.tool === "google")?.level ?? "ask",
+            input: s.permissions.find((p) => p.tool === "input")?.level ?? "deny",
+            clipboard: s.permissions.find((p) => p.tool === "clipboard")?.level ?? "deny",
           },
         },
         (e) => {
@@ -444,6 +455,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
                   ...(e.status === "awaiting_approval" && e.summary ? { approvalReason: e.summary } : {}),
                 },
               });
+              if (e.status === "awaiting_approval")
+                notifyIfAway(stateRef.current.settings.notifications, "Approval needed", e.summary || "The assistant is waiting for your approval.");
               if (e.file) dispatch({ type: "file_change", taskId: liveTaskId, file: { ...e.file, simulated: false } });
               syncLiveTaskStatus();
               break;
@@ -546,6 +559,15 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         });
       },
 
+      startChat: (text) => {
+        const content = text.trim();
+        if (!content) return;
+        const convId = createConversation(titleFromPrompt(content));
+        dispatch({ type: "set_ui", patch: { view: "chat", activeConversationId: convId } });
+        const userMsg: Message = { id: uid("msg"), role: "user", content, createdAt: nowISO(), status: "complete" };
+        dispatch({ type: "add_message", conversationId: convId, message: userMsg });
+        runAssistant(convId, [{ role: "user", content }]);
+      },
       newChat: () => {
         const { ui, conversations } = stateRef.current;
         const active = conversations.find((c) => c.id === ui.activeConversationId);
@@ -598,12 +620,12 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       stopGeneration: (conversationId) => streams.current.get(conversationId)?.abort(),
       createWorkflowConversation: (title) => createConversation(title),
       runTurn: async (conversationId, text) => {
-        const conv = stateRef.current.conversations.find((c) => c.id === conversationId);
-        if (!conv) throw new Error("The workflow's conversation no longer exists.");
+        // A conversation created moments ago may not be in stateRef yet; it then has no history.
+        const prior = stateRef.current.conversations.find((c) => c.id === conversationId)?.messages ?? [];
         if (stateRef.current.streaming[conversationId]) throw new Error("That conversation is already running.");
         const userMsg: Message = { id: uid("msg"), role: "user", content: text, createdAt: nowISO(), status: "complete" };
         dispatch({ type: "add_message", conversationId, message: userMsg });
-        return runAssistant(conversationId, toHistory([...conv.messages, userMsg], stateRef.current.tasks));
+        return runAssistant(conversationId, toHistory([...prior, userMsg], stateRef.current.tasks));
       },
       regenerate: (conversationId) => {
         const conv = stateRef.current.conversations.find((c) => c.id === conversationId);

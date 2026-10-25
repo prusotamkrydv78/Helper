@@ -4,7 +4,7 @@ import type { Workflow, WorkflowStatus, WorkflowStepStatus } from "../types";
 import { Page, PageHeader } from "../components/layout/Page";
 import { Button } from "../components/ui/Button";
 import { Badge, EmptyState, Field, Input, Textarea } from "../components/ui/primitives";
-import { useToast } from "../components/ui/overlays";
+import { ConfirmDialog, useToast } from "../components/ui/overlays";
 import { useStore } from "../store/AppStore";
 import { useWorkflows } from "../store/WorkflowStore";
 import { SchedulesSection } from "./SchedulesSection";
@@ -110,9 +110,13 @@ function CreateWorkflow() {
 
 function WorkflowCard({ wf }: { wf: Workflow }) {
   const { actions, activeId } = useWorkflows();
-  const { actions: app } = useStore();
+  const { state, actions: app } = useStore();
   const toast = useToast();
   const executing = activeId === wf.id;
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const waiting = Object.values(state.tasks)
+    .filter((t) => t.conversationId === wf.conversationId)
+    .flatMap((t) => t.steps.filter((s) => s.status === "awaiting_approval").map((s) => ({ taskId: t.id, step: s })));
   const done = wf.steps.filter((s) => s.status === "completed" || s.status === "skipped").length;
   const guard = (fn: () => void) => () => {
     try {
@@ -177,6 +181,21 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
         })}
       </ol>
 
+      {waiting.map(({ taskId, step }) => (
+        <div key={step.id} className="mt-3 rounded-lg border border-warning/50 bg-warning-soft px-3 py-2 text-sm">
+          <p className="font-medium">Waiting for your approval: {step.title}</p>
+          <p className="text-fg-muted">{step.approvalReason || step.description}</p>
+          <div className="mt-2 flex gap-2">
+            <Button size="sm" variant="primary" onClick={() => app.approveStep(taskId, step.id)}>
+              Approve
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => app.rejectStep(taskId, step.id)}>
+              Decline
+            </Button>
+          </div>
+        </div>
+      ))}
+
       <footer className="mt-3 flex flex-wrap gap-2">
         {(wf.status === "draft" || wf.status === "paused") && (
           <Button size="sm" variant="primary" icon={<Play className="size-3.5" />} onClick={guard(() => (wf.status === "draft" ? actions.start(wf.id) : actions.resume(wf.id)))}>
@@ -197,11 +216,19 @@ function WorkflowCard({ wf }: { wf: Workflow }) {
           Open conversation (approvals, details)
         </Button>
         {!executing && (
-          <Button size="sm" variant="danger-ghost" icon={<Trash2 className="size-3.5" />} onClick={guard(() => actions.remove(wf.id))}>
+          <Button size="sm" variant="danger-ghost" icon={<Trash2 className="size-3.5" />} onClick={() => setConfirmDelete(true)}>
             Delete
           </Button>
         )}
       </footer>
+      <ConfirmDialog
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        onConfirm={guard(() => actions.remove(wf.id))}
+        title="Delete this workflow?"
+        description="The workflow, its results and its conversation are deleted. Schedules using it will stop finding it."
+        confirmLabel="Delete"
+      />
     </article>
   );
 }

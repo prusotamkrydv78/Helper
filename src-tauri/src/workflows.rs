@@ -98,12 +98,22 @@ pub async fn workflow_plan(state: State<'_, AppState>, goal: String, model: Opti
         .map_err(|e| AppError::internal(format!("background task failed: {e}")))??
         .ok_or_else(AppError::missing_api_key)?;
     let model = state.ai.resolve_model(model.as_deref());
+    let mut tools = vec!["files", "web browser", "desktop apps", "system status"];
+    if state.graph.connected() {
+        tools.push("Outlook mail and calendar");
+    }
+    if state.google.connected() {
+        tools.push("Gmail and Google Calendar");
+    }
+    let memory = state.memory.prompt_section().unwrap_or_default();
     let messages = vec![
         json!({ "role": "system", "content": format!(
             "You plan desktop automation workflows. Split the user's goal into 1-{MAX_STEPS} ordered, concrete steps. \
-             Each step is one instruction an assistant with file, browser and desktop-app tools can carry out on its own, \
-             using results of earlier steps. Don't add steps the goal doesn't need. \
-             Reply with JSON only: {{\"steps\": [\"...\", \"...\"]}}"
+             Each step is one instruction an assistant with these tools can carry out on its own: {}. \
+             Steps may use results of earlier steps. Don't add steps the goal doesn't need. Put sending, \
+             deleting or inviting into their own step so the user approves them separately. \
+             Reply with JSON only: {{\"steps\": [\"...\", \"...\"]}}{memory}",
+            tools.join(", ")
         ) }),
         json!({ "role": "user", "content": goal }),
     ];
